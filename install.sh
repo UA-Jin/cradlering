@@ -429,6 +429,149 @@ ensure_path() {
     fi
 }
 
+# 交互式配置向导：模型 / 技能 / 绑定地址 / IM 渠道
+run_onboarding() {
+    [[ "$NO_ONBOARD" == "1" || ! -t 0 ]] && return 0
+    [[ "$DRY_RUN" == "1" ]] && return 0
+    local cfg="$HOME_DIR/cradle-ring.json"
+    # 已有配置则跳过
+    [[ -f "$cfg" ]] && { ui_info "配置已存在，跳过向导"; return 0; }
+
+    ui_step "启动配置向导（可随时按 Ctrl+C 跳过）..."
+    echo ""
+
+    # ===== 1. 模型配置 =====
+    ui_step "【1/4】模型配置（LLM Provider）"
+    echo "  1) OpenAI (api.openai.com)"
+    echo "  2) Anthropic Claude"
+    echo "  3) DeepSeek"
+    echo "  4) 通义千问 Qwen"
+    echo "  5) Ollama（本地，无需 API key）"
+    echo "  6) 跳过（稍后手动配置）"
+    read -p "选择模型 [1-6，默认 6]: " provider_choice </dev/tty
+    provider_choice="${provider_choice:-6}"
+
+    local provider_name="" provider_key="" provider_url="" provider_model=""
+    case "$provider_choice" in
+        1) provider_name="openai"; provider_url="https://api.openai.com/v1"
+           read -p "OpenAI API Key (sk-...): " provider_key </dev/tty
+           read -p "模型 [默认 gpt-4o-mini]: " provider_model </dev/tty; provider_model="${provider_model:-gpt-4o-mini}" ;;
+        2) provider_name="anthropic"; provider_url="https://api.anthropic.com/v1"
+           read -p "Anthropic API Key (sk-ant-...): " provider_key </dev/tty
+           read -p "模型 [默认 claude-3-5-sonnet]: " provider_model </dev/tty; provider_model="${provider_model:-claude-3-5-sonnet}" ;;
+        3) provider_name="deepseek"; provider_url="https://api.deepseek.com/v1"
+           read -p "DeepSeek API Key: " provider_key </dev/tty
+           read -p "模型 [默认 deepseek-chat]: " provider_model </dev/tty; provider_model="${provider_model:-deepseek-chat}" ;;
+        4) provider_name="qwen"; provider_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
+           read -p "Qwen API Key: " provider_key </dev/tty
+           read -p "模型 [默认 qwen-plus]: " provider_model </dev/tty; provider_model="${provider_model:-qwen-plus}" ;;
+        5) provider_name="ollama"; provider_url="http://localhost:11434/v1"; provider_key=""
+           read -p "Ollama 模型 [默认 llama3.2]: " provider_model </dev/tty; provider_model="${provider_model:-llama3.2}" ;;
+        6) ui_info "跳过模型配置" ;;
+    esac
+
+    # ===== 2. 技能选择 =====
+    ui_step "【2/4】技能选择（内置工具）"
+    echo "  1) 全部启用（推荐）"
+    echo "  2) 仅核心工具（exec/read_file/write_file/web_search/memory_save）"
+    echo "  3) 跳过（稍后手动配置）"
+    read -p "选择技能 [1-3，默认 1]: " skills_choice </dev/tty
+    skills_choice="${skills_choice:-1}"
+    local skills_list="*"
+    case "$skills_choice" in
+        1) skills_list="*" ;;
+        2) skills_list="exec,read_file,write_file,web_search,memory_save" ;;
+        3) skills_list="*" ;;
+    esac
+
+    # ===== 3. 绑定地址 =====
+    ui_step "【3/4】网关绑定地址"
+    echo "  1) 仅本机访问 127.0.0.1（推荐，安全）"
+    echo "  2) 开放外网访问 0.0.0.0（需防火墙放行 + 强密码）"
+    read -p "选择绑定 [1-2，默认 1]: " bind_choice </dev/tty
+    bind_choice="${bind_choice:-1}"
+    local bind_host="127.0.0.1"
+    case "$bind_choice" in
+        1) bind_host="127.0.0.1" ;;
+        2) bind_host="0.0.0.0"; ui_warn "⚠️  已选择 0.0.0.0，请确保防火墙放行端口 18800 且密码强度足够" ;;
+    esac
+
+    # ===== 4. IM 渠道 =====
+    ui_step "【4/4】IM 渠道（可多选，留空跳过）"
+    echo "  输入要启用的渠道编号，用空格分隔，如：1 3 5"
+    echo "  1) 飞书"
+    echo "  2) 钉钉"
+    echo "  3) Telegram"
+    echo "  4) Discord"
+    echo "  5) 企业微信"
+    echo "  6) 跳过"
+    read -p "选择渠道 [默认 6]: " channels_choice </dev/tty
+    channels_choice="${channels_choice:-6}"
+
+    local channels_json="{}"
+    if [[ "$channels_choice" != "6" ]]; then
+        local channel_configs=()
+        for ch in $channels_choice; do
+            case "$ch" in
+                1) # 飞书
+                   read -p "飞书 App ID: " feishu_appid </dev/tty
+                   read -p "飞书 App Secret: " feishu_secret </dev/tty
+                   [[ -n "$feishu_appid" ]] && channel_configs+=("\"feishu\": {\"enabled\": true, \"appId\": \"$feishu_appid\", \"appSecret\": \"$feishu_secret\"}") ;;
+                2) # 钉钉
+                   read -p "钉钉 App Key: " dingtalk_key </dev/tty
+                   read -p "钉钉 App Secret: " dingtalk_secret </dev/tty
+                   [[ -n "$dingtalk_key" ]] && channel_configs+=("\"dingtalk\": {\"enabled\": true, \"appKey\": \"$dingtalk_key\", \"appSecret\": \"$dingtalk_secret\"}") ;;
+                3) # Telegram
+                   read -p "Telegram Bot Token: " tg_token </dev/tty
+                   [[ -n "$tg_token" ]] && channel_configs+=("\"telegram\": {\"enabled\": true, \"botToken\": \"$tg_token\"}") ;;
+                4) # Discord
+                   read -p "Discord Bot Token: " discord_token </dev/tty
+                   [[ -n "$discord_token" ]] && channel_configs+=("\"discord\": {\"enabled\": true, \"botToken\": \"$discord_token\"}") ;;
+                5) # 企业微信
+                   read -p "企业微信 Corp ID: " wecom_corpid </dev/tty
+                   read -p "企业微信 Agent ID: " wecom_agentid </dev/tty
+                   read -p "企业微信 Secret: " wecom_secret </dev/tty
+                   [[ -n "$wecom_corpid" ]] && channel_configs+=("\"wecom\": {\"enabled\": true, \"corpId\": \"$wecom_corpid\", \"agentId\": \"$wecom_agentid\", \"secret\": \"$wecom_secret\"}") ;;
+            esac
+        done
+        if [[ ${#channel_configs[@]} -gt 0 ]]; then
+            channels_json="{ $(IFS=,; echo "${channel_configs[*]}") }"
+        fi
+    fi
+
+    # ===== 生成配置文件 =====
+    ui_step "生成配置文件..."
+    local token="$(head -c32 /dev/urandom | xxd -p -c32 2>/dev/null || date +%s%N | sha256sum | cut -c1-32)"
+    local providers_json="{}"
+    if [[ -n "$provider_name" ]]; then
+        providers_json="{\"$provider_name\": {\"apiKey\": \"$provider_key\", \"baseUrl\": \"$provider_url\", \"model\": \"$provider_model\", \"enabled\": true}}"
+    fi
+    local primary_model="${provider_model:-gpt-4o-mini}"
+    if [[ "$provider_choice" == "6" ]]; then primary_model="gpt-4o-mini"; fi
+
+    cat > "$cfg" <<EOCFG
+{
+  "gateway": {
+    "port": 18800,
+    "bind": "$bind_host",
+    "auth": { "mode": "token", "token": "$token" }
+  },
+  "providers": $providers_json,
+  "models": { "primary": "$primary_model" },
+  "skills": { "enabled": "$skills_list" },
+  "channels": $channels_json,
+  "memory": { "engine": "builtin" }
+}
+EOCFG
+    ui_success "配置已保存: $cfg"
+    echo ""
+    ui_info "配置摘要:"
+    [[ -n "$provider_name" ]] && ui_info "  模型: $provider_name / $provider_model"
+    ui_info "  绑定: $bind_host"
+    ui_info "  渠道: $(echo "$channels_choice" | tr -d '\n')"
+    ui_info "  Token: $token"
+}
+
 run_doctor() {
     local claw="$BIN_DIR/cradle-ring"; [[ ! -x "$claw" ]] && return 1
     ui_step "运行诊断..."
@@ -558,17 +701,8 @@ main() {
     install_launchd_service
 
     # Onboarding（交互式配置向导）
-    if [[ "$NO_ONBOARD" != "1" ]] && [[ -t 0 ]]; then
-        local claw="$BIN_DIR/cradle-ring"
-        if [[ -x "$claw" ]]; then
-            ui_step "启动配置向导..."
-            if [[ "$DRY_RUN" != "1" ]]; then
-                "$claw" onboard </dev/tty || true
-            fi
-        fi
-    else
-        run_doctor
-    fi
+    run_onboarding
+    [[ "$NO_ONBOARD" == "1" ]] && run_doctor
 
     [[ "$VERIFY_INSTALL" == "1" ]] && verify_installation
     maybe_open_dashboard
