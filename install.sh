@@ -248,6 +248,8 @@ build_webui() {
         ui_info "使用 $pkg_mgr 安装依赖..."
         # pnpm 11 需要 approve-builds 才能运行构建脚本（vue-demi 等）
         if [[ "$pkg_mgr" == "pnpm" ]]; then
+            # 设置环境变量跳过构建脚本检查，或预先 approve
+            export PNPM_IGNORED_BUILDS="vue-demi@0.13.11,vue-demi@0.14.10"
             pnpm approve-builds vue-demi 2>&1 | tail -1 || true
         fi
         $pkg_mgr install --no-frozen-lockfile 2>&1 | tail -3
