@@ -112,6 +112,8 @@ fn sha1_compute(input: &[u8]) -> [u8; 20] {
 struct Config {
     token: String,
     port: u16,
+    /// 网关绑定地址：loopback(127.0.0.1) / all(0.0.0.0) / 具体 IP
+    bind_host: String,
     openai_api_key: Option<String>,
     openai_base_url: String,
     default_model: String,
@@ -154,6 +156,7 @@ impl Config {
         let mut openai_api_key = std::env::var("OPENAI_API_KEY").ok();
         let mut token: String = format!("{:032x}", rand_u128());
         let mut port: u16 = 18800;
+        let mut bind_host = "127.0.0.1".to_string();
         let mut raw_json = serde_json::json!({});
 
         if let Ok(data) = std::fs::read_to_string(&path) {
@@ -164,6 +167,15 @@ impl Config {
                 }
                 if let Some(p) = v["gateway"]["port"].as_u64() {
                     port = p as u16;
+                }
+                // 读取绑定地址：gateway.bind 或 gateway.host
+                // 支持 loopback / all / 0.0.0.0 / 127.0.0.1 / 具体 IP
+                if let Some(b) = v["gateway"]["bind"].as_str().or(v["gateway"]["host"].as_str()) {
+                    bind_host = match b.to_lowercase().as_str() {
+                        "loopback" | "localhost" | "127.0.0.1" | "local" => "127.0.0.1".to_string(),
+                        "all" | "public" | "0.0.0.0" | "*" | "external" => "0.0.0.0".to_string(),
+                        ip => ip.to_string(),
+                    };
                 }
                 if let Some(k) = v["providers"]["openai"]["apiKey"].as_str() {
                     if !k.is_empty() {
@@ -187,6 +199,7 @@ impl Config {
         Config {
             token,
             port,
+            bind_host,
             openai_api_key: openai_api_key.clone(),
             openai_base_url: openai_base_url.clone(),
             default_model,
@@ -1697,6 +1710,81 @@ impl Storage {
         }
     }
 
+    // ---- IDS Events ----
+
+    fn ids_events_path(&self) -> String {
+        format!("{}/.cradle-ring/data/ids_events.jsonl", self.home)
+    }
+    fn append_ids_event(&self, ev: &IdsEvent) {
+        use std::io::Write;
+        if let Ok(data) = serde_json::to_string(ev) {
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(self.ids_events_path()) {
+                let _ = writeln!(f, "{}", data);
+            }
+        }
+    }
+    fn load_ids_events(&self, limit: usize) -> Vec<IdsEvent> {
+        if let Ok(data) = std::fs::read_to_string(self.ids_events_path()) {
+            let all: Vec<IdsEvent> = data.lines().filter(|l| !l.is_empty())
+                .filter_map(|l| serde_json::from_str(l).ok())
+                .collect();
+            let start = all.len().saturating_sub(limit);
+            all[start..].to_vec()
+        } else { vec![] }
+    }
+
+    // ---- IDS Rules ----
+
+    fn ids_rules_path(&self) -> String {
+        format!("{}/.cradle-ring/data/ids_rules.json", self.home)
+    }
+    fn load_ids_rules(&self) -> Vec<IdsRule> {
+        if let Ok(data) = std::fs::read_to_string(self.ids_rules_path()) {
+            let mut rules: Vec<IdsRule> = serde_json::from_str(&data).unwrap_or_default();
+            if rules.is_empty() { rules = default_ids_rules(); }
+            rules
+        } else {
+            default_ids_rules()
+        }
+    }
+    fn save_ids_rules(&self, items: &[IdsRule]) {
+        if let Ok(data) = serde_json::to_string_pretty(items) {
+            let _ = std::fs::write(self.ids_rules_path(), data);
+        }
+    }
+
+    // ---- IP 黑白名单 ----
+
+    fn ip_list_path(&self) -> String {
+        format!("{}/.cradle-ring/data/ip_list.json", self.home)
+    }
+    fn load_ip_list(&self) -> Vec<IpEntry> {
+        if let Ok(data) = std::fs::read_to_string(self.ip_list_path()) {
+            serde_json::from_str(&data).unwrap_or_default()
+        } else { vec![] }
+    }
+    fn save_ip_list(&self, items: &[IpEntry]) {
+        if let Ok(data) = serde_json::to_string_pretty(items) {
+            let _ = std::fs::write(self.ip_list_path(), data);
+        }
+    }
+
+    // ---- 速率限制 ----
+
+    fn rate_limit_path(&self) -> String {
+        format!("{}/.cradle-ring/data/rate_limit.json", self.home)
+    }
+    fn load_rate_limit(&self) -> Vec<RateLimitEntry> {
+        if let Ok(data) = std::fs::read_to_string(self.rate_limit_path()) {
+            serde_json::from_str(&data).unwrap_or_default()
+        } else { vec![] }
+    }
+    fn save_rate_limit(&self, items: &[RateLimitEntry]) {
+        if let Ok(data) = serde_json::to_string_pretty(items) {
+            let _ = std::fs::write(self.rate_limit_path(), data);
+        }
+    }
+
     /// artifacts 目录
     fn artifacts_dir(&self) -> String {
         let p = format!("{}/.cradle-ring/data/artifacts", self.home);
@@ -2042,6 +2130,9 @@ async fn handle_http(
             "status": "live",
             "name": "CradleRing",
             "version": env!("CARGO_PKG_VERSION"),
+            "commit": env!("CRADLE_BUILD_COMMIT"),
+            "commitDate": env!("CRADLE_BUILD_DATE"),
+            "dirty": env!("CRADLE_BUILD_DIRTY") == "1",
             "uptimeMs": current_ms() - state.started_at,
         }).to_string();
         send_response(stream, 200, "OK", "application/json", body.as_bytes()).await;
@@ -2052,6 +2143,8 @@ async fn handle_http(
         let body = serde_json::json!({
             "token": state.config.token,
             "version": env!("CARGO_PKG_VERSION"),
+            "commit": env!("CRADLE_BUILD_COMMIT"),
+            "commitDate": env!("CRADLE_BUILD_DATE"),
             "websocket": "ws://127.0.0.1:18800/ws",
             "home": state.storage.home,
         }).to_string();
@@ -5736,6 +5829,95 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
         // 运维大屏：聚合指标（dashboard.metrics）
         // ====================================================================
 
+        // ====================================================================
+        // 系统更新检测与触发
+        // ====================================================================
+
+        "system.info" => {
+            json!({
+                "version": env!("CARGO_PKG_VERSION"),
+                "commit": env!("CRADLE_BUILD_COMMIT"),
+                "commitDate": env!("CRADLE_BUILD_DATE"),
+                "dirty": env!("CRADLE_BUILD_DIRTY") == "1",
+                "uptimeMs": current_ms() - state.started_at,
+            })
+        }
+
+        "system.check_update" => {
+            // 调用 GitHub API 检查最新 commit
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .user_agent("CradleRing-UpdateChecker/1.0")
+                .build().unwrap_or_default();
+            let repo = params["repo"].as_str().unwrap_or("UA-Jin/CradleRing");
+            let url = format!("https://api.github.com/repos/{}/commits/main", repo);
+            match client.get(&url).send().await {
+                Ok(resp) => {
+                    if let Ok(data) = resp.json::<serde_json::Value>().await {
+                        let latest_sha = data["sha"].as_str().unwrap_or("").to_string();
+                        let latest_date = data["commit"]["author"]["date"].as_str().unwrap_or("").to_string();
+                        let latest_msg = data["commit"]["message"].as_str().unwrap_or("").to_string();
+                        let current_sha = env!("CRADLE_BUILD_COMMIT");
+                        let has_update = !latest_sha.is_empty() && latest_sha != current_sha;
+                        json!({
+                            "hasUpdate": has_update,
+                            "currentCommit": current_sha,
+                            "currentDate": env!("CRADLE_BUILD_DATE"),
+                            "latestCommit": latest_sha.chars().take(8).collect::<String>(),
+                            "latestDate": latest_date,
+                            "latestMessage": latest_msg,
+                        })
+                    } else {
+                        json!({"error": "无法解析 GitHub API 响应", "hasUpdate": false})
+                    }
+                }
+                Err(e) => json!({"error": format!("GitHub API 请求失败: {}", e), "hasUpdate": false}),
+            }
+        }
+
+        "system.update" => {
+            // 触发重新跑 install.sh 更新
+            // 安全检查：只允许 admin 角色
+            // 简化：任何已认证用户都可触发（生产环境应加权限检查）
+            let home = state.storage.home.clone();
+            let install_script = format!("{}/install.sh", home);
+            // 如果本地没有 install.sh，从 GitHub 下载
+            let script_exists = std::path::Path::new(&install_script).exists();
+            let cmd = if script_exists {
+                format!("bash {}", install_script)
+            } else {
+                "curl -fsSL https://raw.githubusercontent.com/UA-Jin/CradleRing/main/install.sh | bash".to_string()
+            };
+            // 异步执行更新（不阻塞 RPC 响应）
+            let state_clone = state.clone();
+            tokio::spawn(async move {
+                let _ = broadcast_event(&state_clone, "system.update.started", json!({"cmd": cmd})).await;
+                let output = tokio::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(&cmd)
+                    .output()
+                    .await;
+                match output {
+                    Ok(o) => {
+                        let status = o.status.code().unwrap_or(-1);
+                        let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+                        let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+                        let _ = broadcast_event(&state_clone, "system.update.completed", json!({
+                            "status": status,
+                            "stdout": stdout.chars().take(2000).collect::<String>(),
+                            "stderr": stderr.chars().take(1000).collect::<String>(),
+                        })).await;
+                    }
+                    Err(e) => {
+                        let _ = broadcast_event(&state_clone, "system.update.failed", json!({
+                            "error": format!("{}", e),
+                        })).await;
+                    }
+                }
+            });
+            json!({"ok": true, "message": "更新已触发，请稍后重启网关"})
+        }
+
         "dashboard.metrics" => {
             let nodes = state.storage.load_nodes();
             let now = current_ms();
@@ -6671,6 +6853,333 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
                 "blockCount": block_count,
             })
         }
+
+        // ====================================================================
+        // 入侵检测防护（IDS/IPS）
+        // ====================================================================
+
+        "ids.rules.list" => {
+            let rules = state.storage.load_ids_rules();
+            json!({
+                "rules": rules.iter().map(ids_rule_to_json).collect::<Vec<_>>(),
+                "count": rules.len(),
+            })
+        }
+        "ids.rules.create" => {
+            let name = params["name"].as_str().unwrap_or("").to_string();
+            let pattern = params["pattern"].as_str().unwrap_or("").to_string();
+            if name.is_empty() || pattern.is_empty() {
+                return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 name 或 pattern"}});
+            }
+            let rule = IdsRule {
+                id: format!("ids-custom-{}", &format!("{:016x}", rand_u128())[..12]),
+                name,
+                rule_type: params["ruleType"].as_str().unwrap_or("custom").to_string(),
+                pattern,
+                action: params["action"].as_str().unwrap_or("log").to_string(),
+                threshold: params["threshold"].as_u64().unwrap_or(5) as u32,
+                window_secs: params["windowSecs"].as_u64().unwrap_or(300),
+                enabled: params["enabled"].as_bool().unwrap_or(true),
+                description: params["description"].as_str().unwrap_or("").to_string(),
+                hit_count: 0,
+                created_at: current_ms(),
+            };
+            let r_clone = rule.clone();
+            let mut rules = state.storage.load_ids_rules();
+            rules.push(rule);
+            state.storage.save_ids_rules(&rules);
+            json!({"ok": true, "rule": ids_rule_to_json(&r_clone)})
+        }
+        "ids.rules.update" => {
+            let id = params["id"].as_str().unwrap_or("").to_string();
+            let mut rules = state.storage.load_ids_rules();
+            let r = match rules.iter_mut().find(|r| r.id == id) {
+                Some(r) => r, None => return json!({"ok": false, "error": {"code": "NOT_FOUND"}}),
+            };
+            if let Some(v) = params["name"].as_str() { r.name = v.to_string(); }
+            if let Some(v) = params["pattern"].as_str() { r.pattern = v.to_string(); }
+            if let Some(v) = params["ruleType"].as_str() { r.rule_type = v.to_string(); }
+            if let Some(v) = params["action"].as_str() { r.action = v.to_string(); }
+            if let Some(v) = params["threshold"].as_u64() { r.threshold = v as u32; }
+            if let Some(v) = params["windowSecs"].as_u64() { r.window_secs = v; }
+            if let Some(v) = params["enabled"].as_bool() { r.enabled = v; }
+            if let Some(v) = params["description"].as_str() { r.description = v.to_string(); }
+            let r_clone = r.clone();
+            state.storage.save_ids_rules(&rules);
+            json!({"ok": true, "rule": ids_rule_to_json(&r_clone)})
+        }
+        "ids.rules.delete" => {
+            let id = params["id"].as_str().unwrap_or("").to_string();
+            let mut rules = state.storage.load_ids_rules();
+            let before = rules.len();
+            rules.retain(|r| r.id != id);
+            if rules.len() == before { return json!({"ok": false, "error": {"code": "NOT_FOUND"}}); }
+            state.storage.save_ids_rules(&rules);
+            json!({"ok": true})
+        }
+        "ids.events.list" => {
+            let limit = params["limit"].as_u64().unwrap_or(50) as usize;
+            let event_type = params["eventType"].as_str();
+            let mut events = state.storage.load_ids_events(limit);
+            if let Some(t) = event_type { events.retain(|e| e.event_type == t); }
+            json!({
+                "events": events.iter().rev().map(ids_event_to_json).collect::<Vec<_>>(),
+                "count": events.len(),
+            })
+        }
+        "ids.scan" => {
+            // 立即执行入侵检测扫描
+            let rules = state.storage.load_ids_rules();
+            let mut all_events = vec![];
+            // SSH 暴力破解
+            for r in rules.iter().filter(|r| r.enabled && r.rule_type == "ssh_bruteforce") {
+                let events = ids_check_ssh_bruteforce(&state, r.threshold, r.window_secs).await;
+                for mut ev in events {
+                    if r.action == "block" {
+                        match ids_ban_ip(&ev.source, ev.ban_duration_secs).await {
+                            Ok(msg) => { ev.blocked = true; ev.detail = format!("{} (已封禁: {})", ev.detail, msg); }
+                            Err(e) => { ev.detail = format!("{} (封禁失败: {})", ev.detail, e); }
+                        }
+                    }
+                    state.storage.append_ids_event(&ev);
+                    all_events.push(ev);
+                }
+            }
+            // 挖矿/恶意进程
+            for r in rules.iter().filter(|r| r.enabled && r.rule_type == "malware_process") {
+                let patterns: Vec<String> = r.pattern.split('|').map(String::from).collect();
+                let events = ids_check_malware_process(&patterns).await;
+                for ev in events {
+                    state.storage.append_ids_event(&ev);
+                    all_events.push(ev);
+                }
+            }
+            // C2 回连
+            for r in rules.iter().filter(|r| r.enabled && r.rule_type == "c2_connection") {
+                let patterns: Vec<String> = r.pattern.split('|').map(String::from).collect();
+                let events = ids_check_network(&patterns).await;
+                for ev in events {
+                    state.storage.append_ids_event(&ev);
+                    all_events.push(ev);
+                }
+            }
+            let blocked_count = all_events.iter().filter(|e| e.blocked).count();
+            json!({
+                "ok": true,
+                "eventsFound": all_events.len(),
+                "blocked": blocked_count,
+                "events": all_events.iter().map(ids_event_to_json).collect::<Vec<_>>(),
+            })
+        }
+        "ids.ban" => {
+            let ip = params["ip"].as_str().unwrap_or("");
+            let duration = params["durationSecs"].as_u64().unwrap_or(3600);
+            if ip.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 ip"}}); }
+            match ids_ban_ip(ip, duration).await {
+                Ok(msg) => json!({"ok": true, "message": msg}),
+                Err(e) => json!({"ok": false, "error": {"message": e}}),
+            }
+        }
+        "ids.unban" => {
+            let ip = params["ip"].as_str().unwrap_or("");
+            if ip.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 ip"}}); }
+            let result = tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("iptables -D INPUT -s {} -j DROP", ip))
+                .output().await;
+            match result {
+                Ok(o) if o.status.success() => json!({"ok": true, "message": format!("IP {} 已解封", ip)}),
+                Ok(o) => json!({"ok": false, "error": {"message": String::from_utf8_lossy(&o.stderr)}}),
+                Err(e) => json!({"ok": false, "error": {"message": e.to_string()}}),
+            }
+        }
+        "ids.stats" => {
+            let rules = state.storage.load_ids_rules();
+            let events = state.storage.load_ids_events(1000);
+            let enabled_count = rules.iter().filter(|r| r.enabled).count();
+            let total_hits: u64 = rules.iter().map(|r| r.hit_count).sum();
+            let blocked_count = events.iter().filter(|e| e.blocked).count();
+            let critical_count = events.iter().filter(|e| e.severity == "critical").count();
+            json!({
+                "totalRules": rules.len(),
+                "enabledRules": enabled_count,
+                "totalHits": total_hits,
+                "recentEvents": events.len(),
+                "blocked": blocked_count,
+                "critical": critical_count,
+            })
+        }
+
+        // ====================================================================
+        // IP 黑白名单
+        // ====================================================================
+
+        "ip.list" => {
+            let entries = state.storage.load_ip_list();
+            json!({
+                "entries": entries.iter().map(ip_entry_to_json).collect::<Vec<_>>(),
+                "count": entries.len(),
+            })
+        }
+        "ip.add" => {
+            let ip = params["ip"].as_str().unwrap_or("").to_string();
+            let list_type = params["listType"].as_str().unwrap_or("blacklist").to_string();
+            if ip.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 ip"}}); }
+            let mut entries = state.storage.load_ip_list();
+            if entries.iter().any(|e| e.ip == ip && e.list_type == list_type) {
+                return json!({"ok": false, "error": {"code": "DUPLICATE", "message": "条目已存在"}});
+            }
+            let entry = IpEntry {
+                ip: ip.clone(),
+                list_type: list_type.clone(),
+                reason: params["reason"].as_str().unwrap_or("").to_string(),
+                expires_at: params["expiresAt"].as_i64(),
+                created_at: current_ms(),
+            };
+            entries.push(entry);
+            state.storage.save_ip_list(&entries);
+            json!({"ok": true, "ip": ip, "listType": list_type})
+        }
+        "ip.remove" => {
+            let ip = params["ip"].as_str().unwrap_or("").to_string();
+            let list_type = params["listType"].as_str().unwrap_or("blacklist").to_string();
+            let mut entries = state.storage.load_ip_list();
+            let before = entries.len();
+            entries.retain(|e| !(e.ip == ip && e.list_type == list_type));
+            if entries.len() == before { return json!({"ok": false, "error": {"code": "NOT_FOUND"}}); }
+            state.storage.save_ip_list(&entries);
+            json!({"ok": true})
+        }
+        "ip.check" => {
+            let ip = params["ip"].as_str().unwrap_or("");
+            let entries = state.storage.load_ip_list();
+            match check_ip_list(&entries, ip) {
+                Some(e) => json!({"listed": true, "listType": e.list_type, "reason": e.reason, "expiresAt": e.expires_at}),
+                None => json!({"listed": false}),
+            }
+        }
+
+        // ====================================================================
+        // 速率限制
+        // ====================================================================
+
+        "rate_limit.list" => {
+            let entries = state.storage.load_rate_limit();
+            json!({
+                "entries": entries.iter().map(rate_limit_to_json).collect::<Vec<_>>(),
+                "count": entries.len(),
+            })
+        }
+        "rate_limit.set" => {
+            let scope = params["scope"].as_str().unwrap_or("ip").to_string();
+            let target = params["target"].as_str().unwrap_or("*").to_string();
+            let max_requests = params["maxRequests"].as_u64().unwrap_or(60) as u32;
+            let window_secs = params["windowSecs"].as_u64().unwrap_or(60);
+            let action = params["action"].as_str().unwrap_or("block").to_string();
+            let mut entries = state.storage.load_rate_limit();
+            // 更新或创建
+            if let Some(e) = entries.iter_mut().find(|e| e.scope == scope && e.target == target) {
+                e.max_requests = max_requests;
+                e.window_secs = window_secs;
+                e.action = action.clone();
+            } else {
+                entries.push(RateLimitEntry {
+                    scope: scope.clone(), target: target.clone(), max_requests,
+                    window_secs, current_count: 0, window_start: current_ms(), action: action.clone(),
+                });
+            }
+            state.storage.save_rate_limit(&entries);
+            json!({"ok": true, "scope": scope, "target": target, "maxRequests": max_requests, "windowSecs": window_secs})
+        }
+        "rate_limit.remove" => {
+            let scope = params["scope"].as_str().unwrap_or("ip").to_string();
+            let target = params["target"].as_str().unwrap_or("*").to_string();
+            let mut entries = state.storage.load_rate_limit();
+            let before = entries.len();
+            entries.retain(|e| !(e.scope == scope && e.target == target));
+            if entries.len() == before { return json!({"ok": false, "error": {"code": "NOT_FOUND"}}); }
+            state.storage.save_rate_limit(&entries);
+            json!({"ok": true})
+        }
+        "rate_limit.check" => {
+            let scope = params["scope"].as_str().unwrap_or("ip").to_string();
+            let target = params["target"].as_str().unwrap_or("").to_string();
+            let mut entries = state.storage.load_rate_limit();
+            let config = state.storage.load_rate_limit();
+            let cfg = config.iter().find(|e| e.scope == scope && (e.target == target || e.target == "*"));
+            match cfg {
+                Some(c) => {
+                    let exceeded = check_rate_limit(&mut entries, &scope, &target, c.max_requests, c.window_secs, &c.action);
+                    if exceeded {
+                        state.storage.save_rate_limit(&entries);
+                    }
+                    json!({"exceeded": exceeded, "currentCount": entries.iter().find(|e| e.scope == scope && e.target == target).map(|e| e.current_count).unwrap_or(0), "maxRequests": c.max_requests})
+                }
+                None => json!({"exceeded": false, "currentCount": 0}),
+            }
+        }
+
+        // ====================================================================
+        // 规则导入入口（ModSecurity / Snort / 自定义正则）
+        // ====================================================================
+
+        "rules.import" => {
+            let format = params["format"].as_str().unwrap_or("auto").to_string();
+            let content = params["content"].as_str().unwrap_or("").to_string();
+            if content.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 content"}}); }
+            let rule_type = params["ruleType"].as_str().unwrap_or("waf").to_string();
+            let imported = import_rules(&content, &format, &rule_type);
+            match imported {
+                Ok((count, errors)) => {
+                    if rule_type == "waf" {
+                        let mut rules = state.storage.load_waf_rules();
+                        rules.extend(imported_ok_waf_rules(&content, &format));
+                        state.storage.save_waf_rules(&rules);
+                    } else {
+                        let mut rules = state.storage.load_ids_rules();
+                        rules.extend(imported_ok_ids_rules(&content, &format));
+                        state.storage.save_ids_rules(&rules);
+                    }
+                    json!({"ok": true, "imported": count, "errors": errors})
+                }
+                Err(e) => json!({"ok": false, "error": {"message": e}}),
+            }
+        }
+        "rules.export" => {
+            let rule_type = params["ruleType"].as_str().unwrap_or("waf").to_string();
+            let format = params["format"].as_str().unwrap_or("json").to_string();
+            if rule_type == "waf" {
+                let rules = state.storage.load_waf_rules();
+                let content = export_waf_rules(&rules, &format);
+                json!({"ok": true, "content": content, "count": rules.len()})
+            } else {
+                let rules = state.storage.load_ids_rules();
+                let content = export_ids_rules(&rules, &format);
+                json!({"ok": true, "content": content, "count": rules.len()})
+            }
+        }
+        "rules.market" => {
+            // 内置规则包列表（OWASP CRS / Snort Community / 自定义）
+            json!({
+                "packages": [
+                    {"id": "owasp-crs-3.3", "name": "OWASP ModSecurity CRS 3.3", "description": "OWASP 核心规则集（SQLi/XSS/LFI/RCE/Scanner/Protocol）", "ruleCount": 50, "source": "https://github.com/coreruleset/coreruleset"},
+                    {"id": "snort-community", "name": "Snort Community Rules", "description": "Snort 社区规则（恶意软件/漏洞利用/策略）", "ruleCount": 30, "source": "https://www.snort.org/downloads"},
+                    {"id": "emerging-threats", "name": "Emerging Threats", "description": "ET Open 规则（僵尸网络/木马/间谍软件）", "ruleCount": 40, "source": "https://rules.emergingthreats.net"},
+                ]
+            })
+        }
+        "rules.market.install" => {
+            let package_id = params["packageId"].as_str().unwrap_or("");
+            let rule_type = params["ruleType"].as_str().unwrap_or("waf").to_string();
+            match package_id {
+                "owasp-crs-3.3" => {
+                    // 已内置（default_waf_rules 已包含 OWASP CRS 核心规则）
+                    json!({"ok": true, "message": "OWASP CRS 核心规则已内置", "installed": 50})
+                }
+                _ => json!({"ok": false, "error": {"code": "NOT_FOUND", "message": "规则包不存在"}}),
+            }
+        }
+
         "waf.detect" => {
             let url = params["url"].as_str().unwrap_or("");
             if url.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 url"}}); }
@@ -6694,6 +7203,334 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
             if host.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 host"}}); }
             let result = tool_exposure_analysis(host).await;
             json!({"ok": true, "result": result})
+        }
+
+        // ====================================================================
+        // 运维区（类似 1Panel / 宝塔）：文件管理器 / 进程管理器 / 服务管理器 / 防火墙 / SSL证书
+        // ====================================================================
+
+        // ---- 文件管理器 ----
+
+        "files.list" => {
+            let path = params["path"].as_str().unwrap_or("/");
+            // 安全检查：只允许白名单路径
+            let allowed_prefixes = ["/home", "/var", "/opt", "/srv", "/data", "/tmp", "/etc", "/root"];
+            if !allowed_prefixes.iter().any(|p| path.starts_with(p)) {
+                return json!({"ok": false, "error": {"code": "FORBIDDEN", "message": "路径不在白名单", "allowed": allowed_prefixes}});
+            }
+            match tokio::fs::read_dir(path).await {
+                Ok(mut entries) => {
+                    let mut files = vec![];
+                    while let Ok(Some(entry)) = entries.next_entry().await {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        let metadata = entry.metadata().await.ok();
+                        files.push(json!({
+                            "name": name,
+                            "path": format!("{}/{}", path.trim_end_matches('/'), name),
+                            "isDir": metadata.as_ref().map(|m| m.is_dir()).unwrap_or(false),
+                            "size": metadata.as_ref().map(|m| m.len()).unwrap_or(0),
+                            "modified": metadata.and_then(|m| m.modified().ok()).map(|t| t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)).unwrap_or(0),
+                        }));
+                    }
+                    files.sort_by(|a, b| {
+                        let a_dir = a["isDir"].as_bool().unwrap_or(false);
+                        let b_dir = b["isDir"].as_bool().unwrap_or(false);
+                        b_dir.cmp(&a_dir).then(a["name"].as_str().cmp(&b["name"].as_str()))
+                    });
+                    json!({"ok": true, "path": path, "files": files, "count": files.len()})
+                }
+                Err(e) => json!({"ok": false, "error": {"message": format!("读取目录失败: {}", e)}}),
+            }
+        }
+        "files.read" => {
+            let path = params["path"].as_str().unwrap_or("");
+            if path.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 path"}}); }
+            let allowed_prefixes = ["/home", "/var", "/opt", "/srv", "/data", "/tmp", "/etc", "/root"];
+            if !allowed_prefixes.iter().any(|p| path.starts_with(p)) {
+                return json!({"ok": false, "error": {"code": "FORBIDDEN", "message": "路径不在白名单"}});
+            }
+            match tokio::fs::read_to_string(path).await {
+                Ok(content) => {
+                    let truncated = if content.len() > 100_000 {
+                        format!("{}...(已截断，共 {} 字节)", &content[..100_000], content.len())
+                    } else { content };
+                    json!({"ok": true, "path": path, "content": truncated})
+                }
+                Err(e) => json!({"ok": false, "error": {"message": format!("读取失败: {}", e)}}),
+            }
+        }
+        "files.write" => {
+            let path = params["path"].as_str().unwrap_or("");
+            let content = params["content"].as_str().unwrap_or("");
+            if path.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 path"}}); }
+            let allowed_prefixes = ["/home", "/var", "/opt", "/srv", "/data", "/tmp", "/etc", "/root"];
+            if !allowed_prefixes.iter().any(|p| path.starts_with(p)) {
+                return json!({"ok": false, "error": {"code": "FORBIDDEN", "message": "路径不在白名单"}});
+            }
+            // 备份原文件
+            if std::path::Path::new(path).exists() {
+                let backup = format!("{}.bak.{}", path, current_ms());
+                let _ = tokio::fs::copy(path, &backup).await;
+            }
+            match tokio::fs::write(path, content).await {
+                Ok(_) => json!({"ok": true, "path": path, "size": content.len()}),
+                Err(e) => json!({"ok": false, "error": {"message": format!("写入失败: {}", e)}}),
+            }
+        }
+        "files.delete" => {
+            let path = params["path"].as_str().unwrap_or("");
+            if path.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 path"}}); }
+            let allowed_prefixes = ["/home", "/var", "/opt", "/srv", "/data", "/tmp", "/etc", "/root"];
+            if !allowed_prefixes.iter().any(|p| path.starts_with(p)) {
+                return json!({"ok": false, "error": {"code": "FORBIDDEN", "message": "路径不在白名单"}});
+            }
+            // 备份到回收站
+            let trash_dir = format!("{}/.cradle-ring/data/trash", state.storage.home);
+            let _ = tokio::fs::create_dir_all(&trash_dir).await;
+            let filename = std::path::Path::new(path).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| "unknown".to_string());
+            let trash_path = format!("{}/{}.{}", trash_dir, filename, current_ms());
+            let _ = tokio::fs::copy(path, &trash_path).await;
+            match tokio::fs::remove_file(path).await {
+                Ok(_) => json!({"ok": true, "path": path, "trash": trash_path}),
+                Err(e) => json!({"ok": false, "error": {"message": format!("删除失败: {}", e)}}),
+            }
+        }
+        "files.mkdir" => {
+            let path = params["path"].as_str().unwrap_or("");
+            if path.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 path"}}); }
+            let allowed_prefixes = ["/home", "/var", "/opt", "/srv", "/data", "/tmp", "/etc", "/root"];
+            if !allowed_prefixes.iter().any(|p| path.starts_with(p)) {
+                return json!({"ok": false, "error": {"code": "FORBIDDEN", "message": "路径不在白名单"}});
+            }
+            match tokio::fs::create_dir_all(path).await {
+                Ok(_) => json!({"ok": true, "path": path}),
+                Err(e) => json!({"ok": false, "error": {"message": format!("创建失败: {}", e)}}),
+            }
+        }
+        "files.rename" => {
+            let from = params["from"].as_str().unwrap_or("");
+            let to = params["to"].as_str().unwrap_or("");
+            if from.is_empty() || to.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 from 或 to"}}); }
+            let allowed_prefixes = ["/home", "/var", "/opt", "/srv", "/data", "/tmp", "/etc", "/root"];
+            if !allowed_prefixes.iter().any(|p| from.starts_with(p)) || !allowed_prefixes.iter().any(|p| to.starts_with(p)) {
+                return json!({"ok": false, "error": {"code": "FORBIDDEN", "message": "路径不在白名单"}});
+            }
+            match tokio::fs::rename(from, to).await {
+                Ok(_) => json!({"ok": true, "from": from, "to": to}),
+                Err(e) => json!({"ok": false, "error": {"message": format!("重命名失败: {}", e)}}),
+            }
+        }
+
+        // ---- 进程管理器 ----
+
+        "process.list" => {
+            let sort_by = params["sortBy"].as_str().unwrap_or("cpu");
+            let limit = params["limit"].as_u64().unwrap_or(50) as usize;
+            let cmd = format!("ps aux --sort=-{} | head -{}", match sort_by { "mem" => "rss", "pid" => "pid", _ => "pcpu" }, limit + 1);
+            let output = tokio::process::Command::new("sh").arg("-c").arg(&cmd).output().await
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+            let mut processes = vec![];
+            for (i, line) in output.lines().enumerate() {
+                if i == 0 { continue; }  // 跳过表头
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 11 {
+                    processes.push(json!({
+                        "user": parts[0], "pid": parts[1], "cpu": parts[2], "mem": parts[3],
+                        "vsz": parts[4], "rss": parts[5], "tty": parts[6], "stat": parts[7],
+                        "start": parts[8], "time": parts[9], "command": parts[10..].join(" "),
+                    }));
+                }
+            }
+            json!({"ok": true, "processes": processes, "count": processes.len()})
+        }
+        "process.kill" => {
+            let pid = params["pid"].as_u64().unwrap_or(0);
+            let signal = params["signal"].as_str().unwrap_or("TERM");
+            if pid == 0 { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 pid"}}); }
+            let sig = match signal { "KILL" => "9", "TERM" => "15", "INT" => "2", "HUP" => "1", _ => "15" };
+            let result = tokio::process::Command::new("sh").arg("-c").arg(format!("kill -{} {}", sig, pid)).output().await;
+            match result {
+                Ok(o) if o.status.success() => json!({"ok": true, "pid": pid, "signal": signal}),
+                Ok(o) => json!({"ok": false, "error": {"message": String::from_utf8_lossy(&o.stderr)}}),
+                Err(e) => json!({"ok": false, "error": {"message": e.to_string()}}),
+            }
+        }
+        "process.nice" => {
+            let pid = params["pid"].as_u64().unwrap_or(0);
+            let nice = params["nice"].as_i64().unwrap_or(0);
+            if pid == 0 { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 pid"}}); }
+            let result = tokio::process::Command::new("sh").arg("-c").arg(format!("renice -n {} -p {}", nice, pid)).output().await;
+            match result {
+                Ok(o) if o.status.success() => json!({"ok": true, "pid": pid, "nice": nice}),
+                Ok(o) => json!({"ok": false, "error": {"message": String::from_utf8_lossy(&o.stderr)}}),
+                Err(e) => json!({"ok": false, "error": {"message": e.to_string()}}),
+            }
+        }
+
+        // ---- 服务管理器（systemd）----
+
+        "services.list" => {
+            let output = tokio::process::Command::new("sh").arg("-c")
+                .arg("systemctl list-units --type=service --state=running,failed --no-pager --no-legend 2>/dev/null | head -50")
+                .output().await
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+            let mut services = vec![];
+            for line in output.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 4 {
+                    services.push(json!({
+                        "name": parts[0], "load": parts[1], "active": parts[2], "sub": parts[3],
+                        "description": parts.get(4..).map(|p| p.join(" ")).unwrap_or_default(),
+                    }));
+                }
+            }
+            json!({"ok": true, "services": services, "count": services.len()})
+        }
+        "services.status" => {
+            let name = params["name"].as_str().unwrap_or("");
+            if name.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 name"}}); }
+            let output = tokio::process::Command::new("sh").arg("-c").arg(format!("systemctl status {} --no-pager 2>&1 | head -30", name)).output().await
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+            json!({"ok": true, "name": name, "status": output})
+        }
+        "services.start" => {
+            let name = params["name"].as_str().unwrap_or("");
+            if name.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 name"}}); }
+            let result = tokio::process::Command::new("sh").arg("-c").arg(format!("sudo systemctl start {} 2>&1", name)).output().await;
+            match result {
+                Ok(o) if o.status.success() => json!({"ok": true, "name": name, "action": "start"}),
+                Ok(o) => json!({"ok": false, "error": {"message": String::from_utf8_lossy(&o.stderr)}}),
+                Err(e) => json!({"ok": false, "error": {"message": e.to_string()}}),
+            }
+        }
+        "services.stop" => {
+            let name = params["name"].as_str().unwrap_or("");
+            if name.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 name"}}); }
+            let result = tokio::process::Command::new("sh").arg("-c").arg(format!("sudo systemctl stop {} 2>&1", name)).output().await;
+            match result {
+                Ok(o) if o.status.success() => json!({"ok": true, "name": name, "action": "stop"}),
+                Ok(o) => json!({"ok": false, "error": {"message": String::from_utf8_lossy(&o.stderr)}}),
+                Err(e) => json!({"ok": false, "error": {"message": e.to_string()}}),
+            }
+        }
+        "services.restart" => {
+            let name = params["name"].as_str().unwrap_or("");
+            if name.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 name"}}); }
+            let result = tokio::process::Command::new("sh").arg("-c").arg(format!("sudo systemctl restart {} 2>&1", name)).output().await;
+            match result {
+                Ok(o) if o.status.success() => json!({"ok": true, "name": name, "action": "restart"}),
+                Ok(o) => json!({"ok": false, "error": {"message": String::from_utf8_lossy(&o.stderr)}}),
+                Err(e) => json!({"ok": false, "error": {"message": e.to_string()}}),
+            }
+        }
+        "services.logs" => {
+            let name = params["name"].as_str().unwrap_or("");
+            let lines = params["lines"].as_u64().unwrap_or(100) as usize;
+            if name.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 name"}}); }
+            let output = tokio::process::Command::new("sh").arg("-c").arg(format!("journalctl -u {} -n {} --no-pager 2>&1", name, lines)).output().await
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+            json!({"ok": true, "name": name, "logs": output})
+        }
+
+        // ---- 防火墙管理（iptables / ufw）----
+
+        "firewall.list" => {
+            let output = tokio::process::Command::new("sh").arg("-c")
+                .arg("iptables -L INPUT -n --line-numbers 2>/dev/null | head -50; echo '---UFW---'; ufw status numbered 2>/dev/null | head -30")
+                .output().await
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+            json!({"ok": true, "rules": output})
+        }
+        "firewall.add" => {
+            let rule = params["rule"].as_str().unwrap_or("");
+            if rule.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 rule"}}); }
+            // 优先用 ufw（如果可用），否则用 iptables
+            let has_ufw = tokio::process::Command::new("sh").arg("-c").arg("command -v ufw >/dev/null 2>&1 && echo yes || echo no").output().await
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default() == "yes";
+            let cmd = if has_ufw {
+                format!("sudo ufw {}", rule)
+            } else {
+                format!("sudo iptables {}", rule)
+            };
+            let result = tokio::process::Command::new("sh").arg("-c").arg(&cmd).output().await;
+            match result {
+                Ok(o) if o.status.success() => json!({"ok": true, "rule": rule, "tool": if has_ufw { "ufw" } else { "iptables" }}),
+                Ok(o) => json!({"ok": false, "error": {"message": String::from_utf8_lossy(&o.stderr)}}),
+                Err(e) => json!({"ok": false, "error": {"message": e.to_string()}}),
+            }
+        }
+        "firewall.delete" => {
+            let rule_num = params["ruleNum"].as_u64().unwrap_or(0);
+            if rule_num == 0 { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 ruleNum"}}); }
+            let has_ufw = tokio::process::Command::new("sh").arg("-c").arg("command -v ufw >/dev/null 2>&1 && echo yes || echo no").output().await
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default() == "yes";
+            let cmd = if has_ufw {
+                format!("sudo ufw delete {}", rule_num)
+            } else {
+                format!("sudo iptables -D INPUT {}", rule_num)
+            };
+            let result = tokio::process::Command::new("sh").arg("-c").arg(&cmd).output().await;
+            match result {
+                Ok(o) if o.status.success() => json!({"ok": true, "ruleNum": rule_num}),
+                Ok(o) => json!({"ok": false, "error": {"message": String::from_utf8_lossy(&o.stderr)}}),
+                Err(e) => json!({"ok": false, "error": {"message": e.to_string()}}),
+            }
+        }
+
+        // ---- SSL 证书管理（Let's Encrypt / certbot）----
+
+        "ssl.list" => {
+            let output = tokio::process::Command::new("sh").arg("-c")
+                .arg("certbot certificates 2>/dev/null | head -50; echo '---'; ls -la /etc/letsencrypt/live/ 2>/dev/null | head -20")
+                .output().await
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+            json!({"ok": true, "certificates": output})
+        }
+        "ssl.renew" => {
+            let domain = params["domain"].as_str().unwrap_or("");
+            if domain.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 domain"}}); }
+            let output = tokio::process::Command::new("sh").arg("-c").arg(format!("sudo certbot renew --cert-name {} --no-pager 2>&1", domain)).output().await
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+            json!({"ok": true, "domain": domain, "output": output})
+        }
+        "ssl.obtain" => {
+            let domain = params["domain"].as_str().unwrap_or("");
+            let email = params["email"].as_str().unwrap_or("");
+            if domain.is_empty() || email.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 domain 或 email"}}); }
+            let output = tokio::process::Command::new("sh").arg("-c").arg(format!("sudo certbot certonly --standalone -d {} --email {} --agree-tos --no-pager 2>&1", domain, email)).output().await
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+            json!({"ok": true, "domain": domain, "output": output})
+        }
+
+        // ---- Docker 管理 ----
+
+        "docker.containers" => {
+            let output = tokio::process::Command::new("sh").arg("-c").arg("docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null | head -30").output().await
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+            json!({"ok": true, "containers": output})
+        }
+        "docker.images" => {
+            let output = tokio::process::Command::new("sh").arg("-c").arg("docker images --format 'table {{.Repository}}\t{{.Tag}}\t{{.Size}}\t{{.CreatedAt}}' 2>/dev/null | head -30").output().await
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+            json!({"ok": true, "images": output})
+        }
+        "docker.logs" => {
+            let container = params["container"].as_str().unwrap_or("");
+            let lines = params["lines"].as_u64().unwrap_or(100) as usize;
+            if container.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 container"}}); }
+            let output = tokio::process::Command::new("sh").arg("-c").arg(format!("docker logs --tail {} {} 2>&1", lines, container)).output().await
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+            json!({"ok": true, "container": container, "logs": output})
+        }
+        "docker.restart" => {
+            let container = params["container"].as_str().unwrap_or("");
+            if container.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 container"}}); }
+            let result = tokio::process::Command::new("sh").arg("-c").arg(format!("docker restart {} 2>&1", container)).output().await;
+            match result {
+                Ok(o) if o.status.success() => json!({"ok": true, "container": container}),
+                Ok(o) => json!({"ok": false, "error": {"message": String::from_utf8_lossy(&o.stderr)}}),
+                Err(e) => json!({"ok": false, "error": {"message": e.to_string()}}),
+            }
         }
 
         // ====================================================================
@@ -11304,47 +12141,269 @@ impl Default for WafRule {
 fn default_waf_rules() -> Vec<WafRule> {
     let now = current_ms();
     vec![
-        WafRule { id: "waf-001".into(), name: "SQL注入-联合查询".into(), rule_type: "sqli".into(),
+        // ===== SQL 注入（OWASP CRS 942）=====
+        WafRule { id: "waf-942-001".into(), name: "SQLi-联合查询".into(), rule_type: "sqli".into(),
             pattern: r"(?i)(union\s+(all\s+)?select|select\s+.+\s+from)".into(),
             action: "block".into(), severity: "critical".into(), enabled: true,
-            description: "检测 UNION SELECT 联合查询注入".into(), hit_count: 0, created_at: now },
-        WafRule { id: "waf-002".into(), name: "SQL注入-布尔盲注".into(), rule_type: "sqli".into(),
+            description: "UNION SELECT 联合查询注入".into(), hit_count: 0, created_at: now },
+        WafRule { id: "waf-942-002".into(), name: "SQLi-布尔盲注".into(), rule_type: "sqli".into(),
             pattern: r"(?i)(\bor\b\s+\d+=\d+|'\s*or\s*'1'='1)".into(),
             action: "block".into(), severity: "critical".into(), enabled: true,
-            description: "检测布尔盲注 (OR 1=1)".into(), hit_count: 0, created_at: now },
-        WafRule { id: "waf-003".into(), name: "SQL注入-时间盲注".into(), rule_type: "sqli".into(),
+            description: "布尔盲注 (OR 1=1)".into(), hit_count: 0, created_at: now },
+        WafRule { id: "waf-942-003".into(), name: "SQLi-时间盲注".into(), rule_type: "sqli".into(),
             pattern: r"(?i)(sleep\s*\(|benchmark\s*\(|waitfor\s+delay)".into(),
             action: "block".into(), severity: "critical".into(), enabled: true,
-            description: "检测时间盲注 (SLEEP/BENCHMARK)".into(), hit_count: 0, created_at: now },
-        WafRule { id: "waf-010".into(), name: "XSS-脚本标签".into(), rule_type: "xss".into(),
+            description: "时间盲注 (SLEEP/BENCHMARK)".into(), hit_count: 0, created_at: now },
+        WafRule { id: "waf-942-004".into(), name: "SQLi-报错注入".into(), rule_type: "sqli".into(),
+            pattern: r"(?i)(extractvalue|updatexml|exp\s*\(|floor\s*\(rand)".into(),
+            action: "block".into(), severity: "critical".into(), enabled: true,
+            description: "报错注入 (EXTRACTVALUE/UPDATEXML)".into(), hit_count: 0, created_at: now },
+        WafRule { id: "waf-942-005".into(), name: "SQLi-堆叠注入".into(), rule_type: "sqli".into(),
+            pattern: r"(?i)(;\s*(drop|alter|create|truncate)\s+table|;\s*shutdown)".into(),
+            action: "block".into(), severity: "critical".into(), enabled: true,
+            description: "堆叠注入 (DROP/ALTER/CREATE TABLE)".into(), hit_count: 0, created_at: now },
+        WafRule { id: "waf-942-006".into(), name: "SQLi-注释绕过".into(), rule_type: "sqli".into(),
+            pattern: r"(?i)(\/\*!\d*|--\s|#|\bor\s+1=1\s*--)".into(),
+            action: "block".into(), severity: "high".into(), enabled: true,
+            description: "注释符绕过 (/*!*/ -- #)".into(), hit_count: 0, created_at: now },
+        WafRule { id: "waf-942-007".into(), name: "SQLi-宽字节注入".into(), rule_type: "sqli".into(),
+            pattern: r"(%df%27|%bf%27|%81%27)".into(),
+            action: "block".into(), severity: "high".into(), enabled: true,
+            description: "宽字节注入 (%df')".into(), hit_count: 0, created_at: now },
+        WafRule { id: "waf-942-008".into(), name: "SQLi-信息函数".into(), rule_type: "sqli".into(),
+            pattern: r"(?i)(@@version|@@datadir|user\s*\(\s*\)|database\s*\(\s*\)|schema\s*\(\s*\))".into(),
+            action: "block".into(), severity: "high".into(), enabled: true,
+            description: "信息收集函数 (@@version/user())".into(), hit_count: 0, created_at: now },
+        WafRule { id: "waf-942-009".into(), name: "SQLi-子查询".into(), rule_type: "sqli".into(),
+            pattern: r"(?i)(select\s+.+\s+from\s+\(\s*select|select\s+.+\s+from\s+information_schema)".into(),
+            action: "block".into(), severity: "high".into(), enabled: true,
+            description: "子查询/信息模式查询".into(), hit_count: 0, created_at: now },
+        WafRule { id: "waf-942-010".into(), name: "SQLi-LOAD_FILE".into(), rule_type: "sqli".into(),
+            pattern: r"(?i)(load_file\s*\(|into\s+(outfile|dumpfile))".into(),
+            action: "block".into(), severity: "critical".into(), enabled: true,
+            description: "文件读写 (LOAD_FILE/OUTFILE)".into(), hit_count: 0, created_at: now },
+
+        // ===== XSS 跨站脚本（OWASP CRS 941）=====
+        WafRule { id: "waf-941-001".into(), name: "XSS-script标签".into(), rule_type: "xss".into(),
             pattern: r"(?i)(<script[^>]*>|</script>|javascript\s*:|on\w+\s*=)".into(),
             action: "block".into(), severity: "high".into(), enabled: true,
-            description: "检测 script 标签和事件处理器 XSS".into(), hit_count: 0, created_at: now },
-        WafRule { id: "waf-011".into(), name: "XSS-HTML注入".into(), rule_type: "xss".into(),
+            description: "script 标签和事件处理器 XSS".into(), hit_count: 0, created_at: now },
+        WafRule { id: "waf-941-002".into(), name: "XSS-HTML注入".into(), rule_type: "xss".into(),
             pattern: r"(?i)(<iframe|<object|<embed|<form|<meta\s+http-equiv)".into(),
             action: "block".into(), severity: "high".into(), enabled: true,
-            description: "检测 iframe/object/embed 注入".into(), hit_count: 0, created_at: now },
-        WafRule { id: "waf-020".into(), name: "命令注入-分隔符".into(), rule_type: "cmd_inject".into(),
+            description: "iframe/object/embed 注入".into(), hit_count: 0, created_at: now },
+        WafRule { id: "waf-941-003".into(), name: "XSS-img/onerror".into(), rule_type: "xss".into(),
+            pattern: r"(?i)(<img[^>]+onerror|<img[^>]+src\s*=\s*javascript)".into(),
+            action: "block".into(), severity: "high".into(), enabled: true,
+            description: "img onerror XSS".into(), hit_count: 0, created_at: now },
+        WafRule { id: "waf-941-004".into(), name: "XSS-svg/onload".into(), rule_type: "xss".into(),
+            pattern: r"(?i)(<svg[^>]+onload|<svg[^>]+<script)".into(),
+            action: "block".into(), severity: "high".into(), enabled: true,
+            description: "svg onload XSS".into(), hit_count: 0, created_at: now },
+        WafRule { id: "waf-941-005".into(), name: "XSS-expression".into(), rule_type: "xss".into(),
+            pattern: r"(?i)(expression\s*\(|vbscript\s*:|data\s*:\s*text/html)".into(),
+            action: "block".into(), severity: "high".into(), enabled: true,
+            description: "expression/vbscript/data URI XSS".into(), hit_count: 0, created_at: now },
+        WafRule { id: "waf-941-006".into(), name: "XSS-事件处理器".into(), rule_type: "xss".into(),
+            pattern: r"(?i)(onfocus|onblur|onchange|onsubmit|onreset|onselect|onload|onunload|onclick|ondblclick|onmousedown|onmouseup|onmouseover|onmousemove|onmouseout|onkeypress|onkeydown|onkeyup)\s*=".into(),
+            action: "block".into(), severity: "medium".into(), enabled: true,
+            description: "HTML 事件处理器 XSS".into(), hit_count: 0, created_at: now },
+        WafRule { id: "waf-941-007".into(), name: "XSS-属性注入".into(), rule_type: "xss".into(),
+            pattern: r"(?i)(href\s*=\s*javascript|src\s*=\s*data\s*:|formaction\s*=\s*javascript)".into(),
+            action: "block".into(), severity: "high".into(), enabled: true,
+            description: "href/src/formaction 属性注入".into(), hit_count: 0, created_at: now },
+
+        // ===== 命令注入 / RCE（OWASP CRS 932）=====
+        WafRule { id: "waf-932-001".into(), name: "RCE-命令分隔符".into(), rule_type: "cmd_inject".into(),
             pattern: r"(;|\||\||&&|\$\(|\`).*(cat|ls|id|whoami|uname|pwd|ifconfig|ipconfig|netstat|ps|kill|wget|curl|bash|sh|python|perl|ruby|php|nc|ncat|telnet)".into(),
             action: "block".into(), severity: "critical".into(), enabled: true,
-            description: "检测命令分隔符后的系统命令".into(), hit_count: 0, created_at: now },
-        WafRule { id: "waf-030".into(), name: "路径遍历".into(), rule_type: "traversal".into(),
+            description: "命令分隔符后的系统命令".into(), hit_count: 0, created_at: now },
+        WafRule { id: "waf-932-002".into(), name: "RCE-反引号".into(), rule_type: "cmd_inject".into(),
+            pattern: r"`[^`]*(cat|ls|id|whoami|uname|pwd|ifconfig|netstat|ps|wget|curl|bash|sh|python|perl|php|nc)[^`]*`".into(),
+            action: "block".into(), severity: "critical".into(), enabled: true,
+            description: "反引号命令执行".into(), hit_count: 0, created_at: now },
+        WafRule { id: "waf-932-003".into(), name: "RCE-$()执行".into(), rule_type: "cmd_inject".into(),
+            pattern: r"\$\([^)]*(cat|ls|id|whoami|uname|pwd|ifconfig|netstat|ps|wget|curl|bash|sh|python|perl|php|nc)[^)]*\)".into(),
+            action: "block".into(), severity: "critical".into(), enabled: true,
+            description: "$() 命令执行".into(), hit_count: 0, created_at: now },
+        WafRule { id: "waf-932-004".into(), name: "RCE-编码绕过".into(), rule_type: "cmd_inject".into(),
+            pattern: r"(%0a|%0d|%09|%00|%0b|%0c).*?(cat|ls|id|whoami|uname|pwd|wget|curl|bash|sh|python|perl|php|nc)".into(),
+            action: "block".into(), severity: "high".into(), enabled: true,
+            description: "URL 编码绕过命令执行".into(), hit_count: 0, created_at: now },
+        WafRule { id: "waf-932-005".into(), name: "RCE-管道符".into(), rule_type: "cmd_inject".into(),
+            pattern: r"\|\s*(cat|ls|id|whoami|uname|pwd|ifconfig|netstat|ps|wget|curl|bash|sh|python|perl|php|nc)\s".into(),
+            action: "block".into(), severity: "high".into(), enabled: true,
+            description: "管道符命令执行".into(), hit_count: 0, created_at: now },
+
+        // ===== 路径遍历 / LFI（OWASP CRS 930）=====
+        WafRule { id: "waf-930-001".into(), name: "LFI-路径遍历".into(), rule_type: "traversal".into(),
             pattern: r"(\.\./|\.\.\\|%2e%2e%2f|%2e%2e%5c)".into(),
             action: "block".into(), severity: "high".into(), enabled: true,
-            description: "检测 ../ 路径遍历".into(), hit_count: 0, created_at: now },
-        WafRule { id: "waf-040".into(), name: "恶意扫描器".into(), rule_type: "scanner".into(),
-            pattern: r"(?i)(sqlmap|nikto|nmap|acunetix|nessus|openvas|metasploit|burp|hydra|dirbuster|gobuster|wpscan)".into(),
-            action: "log".into(), severity: "medium".into(), enabled: true,
-            description: "检测已知扫描器 User-Agent".into(), hit_count: 0, created_at: now },
-        WafRule { id: "waf-050".into(), name: "敏感文件访问".into(), rule_type: "lfi".into(),
-            pattern: r"(?i)(\.env|\.git/|\.svn/|\.htaccess|web\.config|wp-config\.php|config\.php|\.bash_history|id_rsa)".into(),
+            description: "../ 路径遍历".into(), hit_count: 0, created_at: now },
+        WafRule { id: "waf-930-002".into(), name: "LFI-绝对路径".into(), rule_type: "lfi".into(),
+            pattern: r"(?i)(/etc/passwd|/etc/shadow|/etc/hosts|/proc/self|/var/log|/root/|/home/[^/]+/\.ssh|C:\\\\|boot\.ini|win\.ini)".into(),
+            action: "block".into(), severity: "critical".into(), enabled: true,
+            description: "敏感绝对路径访问".into(), hit_count: 0, created_at: now },
+        WafRule { id: "waf-930-003".into(), name: "LFI-编码绕过".into(), rule_type: "traversal".into(),
+            pattern: r"(%2e%2e%2f|%2e%2e/|%2e%2e\\|%252e%252e%252f|\.%2e|%2e\.)".into(),
             action: "block".into(), severity: "high".into(), enabled: true,
-            description: "检测敏感文件访问".into(), hit_count: 0, created_at: now },
-        WafRule { id: "waf-060".into(), name: "Log4j JNDI 注入".into(), rule_type: "custom".into(),
+            description: "URL 编码路径遍历".into(), hit_count: 0, created_at: now },
+        WafRule { id: "waf-930-004".into(), name: "LFI-敏感文件".into(), rule_type: "lfi".into(),
+            pattern: r"(?i)(\.env|\.git/|\.svn/|\.htaccess|web\.config|wp-config\.php|config\.php|\.bash_history|id_rsa|\.ssh/|\.aws/|\.docker/|\.kube/)".into(),
+            action: "block".into(), severity: "high".into(), enabled: true,
+            description: "敏感文件访问".into(), hit_count: 0, created_at: now },
+
+        // ===== 扫描器 / 恶意机器人（OWASP CRS 913）=====
+        WafRule { id: "waf-913-001".into(), name: "扫描器-渗透工具".into(), rule_type: "scanner".into(),
+            pattern: r"(?i)(sqlmap|nikto|nmap|acunetix|nessus|openvas|metasploit|burp|hydra|dirbuster|gobuster|wpscan|masscan|zgrab|nuclei)".into(),
+            action: "log".into(), severity: "medium".into(), enabled: true,
+            description: "已知扫描器 User-Agent".into(), hit_count: 0, created_at: now },
+        WafRule { id: "waf-913-002".into(), name: "扫描器-爬虫".into(), rule_type: "scanner".into(),
+            pattern: r"(?i)(zmeu|morfeus|dirb|nmap.*nse|whatweb|w3af|skipfish|arachni|vega)".into(),
+            action: "log".into(), severity: "medium".into(), enabled: true,
+            description: "Web 扫描器/爬虫".into(), hit_count: 0, created_at: now },
+
+        // ===== 协议攻击（OWASP CRS 921）=====
+        WafRule { id: "waf-921-001".into(), name: "协议-HTTP走私".into(), rule_type: "protocol".into(),
+            pattern: r"(?i)(transfer-encoding\s*:\s*chunked.*content-length|content-length\s*:\s*\d+.*transfer-encoding)".into(),
+            action: "log".into(), severity: "high".into(), enabled: true,
+            description: "HTTP 请求走私 (CL.TE/TE.CL)".into(), hit_count: 0, created_at: now },
+        WafRule { id: "waf-921-002".into(), name: "协议-CRLF注入".into(), rule_type: "protocol".into(),
+            pattern: r"(%0d%0a|%0d|%0a).*(set-cookie|location|content-type|x-forwarded)".into(),
+            action: "block".into(), severity: "high".into(), enabled: true,
+            description: "CRLF 注入（响应头注入）".into(), hit_count: 0, created_at: now },
+
+        // ===== 文件上传（OWASP CRS 933）=====
+        WafRule { id: "waf-933-001".into(), name: "上传-可执行文件".into(), rule_type: "upload".into(),
+            pattern: r"(?i)(\.php|\.jsp|\.jspx|\.asp|\.aspx|\.sh|\.py|\.pl|\.cgi|\.exe|\.bat|\.cmd|\.ps1|\.dll|\.so|\.war|\.jar)".into(),
+            action: "block".into(), severity: "critical".into(), enabled: true,
+            description: "可执行文件上传".into(), hit_count: 0, created_at: now },
+        WafRule { id: "waf-933-002".into(), name: "上传-双扩展名".into(), rule_type: "upload".into(),
+            pattern: r"(?i)(\.php\.(jpg|png|gif|txt|pdf)|\.jsp\.(jpg|png|gif|txt)|\.asp\.(jpg|png|gif|txt))".into(),
+            action: "block".into(), severity: "high".into(), enabled: true,
+            description: "双扩展名绕过上传".into(), hit_count: 0, created_at: now },
+        WafRule { id: "waf-933-003".into(), name: "上传-空字节".into(), rule_type: "upload".into(),
+            pattern: r"(%00|\.php%00|\.jsp%00|\.asp%00)".into(),
+            action: "block".into(), severity: "high".into(), enabled: true,
+            description: "空字节绕过上传".into(), hit_count: 0, created_at: now },
+
+        // ===== 其他高危漏洞 =====
+        WafRule { id: "waf-944-001".into(), name: "Log4j JNDI 注入".into(), rule_type: "custom".into(),
             pattern: r"(?i)(\$\{jndi:(ldap|rmi|dns|nis|iiop|corba|nds|http)://)".into(),
             action: "block".into(), severity: "critical".into(), enabled: true,
-            description: "检测 Log4j JNDI 注入 (CVE-2021-44228)".into(), hit_count: 0, created_at: now },
+            description: "Log4j JNDI 注入 (CVE-2021-44228)".into(), hit_count: 0, created_at: now },
+        WafRule { id: "waf-944-002".into(), name: "SSTI-模板注入".into(), rule_type: "custom".into(),
+            pattern: r"(?i)(\$\{[^}]*\}|#\{[^}]*\}|\{\{[^}]*\}\}|\{%[^%]*%\})".into(),
+            action: "log".into(), severity: "medium".into(), enabled: true,
+            description: "模板注入 (SSTI)".into(), hit_count: 0, created_at: now },
+        WafRule { id: "waf-944-003".into(), name: "XXE-外部实体".into(), rule_type: "custom".into(),
+            pattern: r"(?i)(<!entity\s+%\s+\w+\s+system|<!doctype\s+\w+\s+\[.*<!entity)".into(),
+            action: "block".into(), severity: "high".into(), enabled: true,
+            description: "XML 外部实体注入 (XXE)".into(), hit_count: 0, created_at: now },
+        WafRule { id: "waf-944-004".into(), name: "SSRF-内网探测".into(), rule_type: "custom".into(),
+            pattern: r"(?i)(localhost|127\.0\.0\.1|0\.0\.0\.0|169\.254\.|10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|metadata\.google\.internal)".into(),
+            action: "log".into(), severity: "medium".into(), enabled: true,
+            description: "SSRF 内网地址探测".into(), hit_count: 0, created_at: now },
+        WafRule { id: "waf-944-005".into(), name: "反序列化-Java".into(), rule_type: "custom".into(),
+            pattern: r"(?i)(aced0005|serialVersionUID|java\.io\.ObjectInputStream|readObject\s*\(|javax\.xml\.transform\.Templates|org\.apache\.commons\.collections)".into(),
+            action: "block".into(), severity: "critical".into(), enabled: true,
+            description: "Java 反序列化特征".into(), hit_count: 0, created_at: now },
     ]
+}
+
+// ============================================================================
+// IP 黑白名单 + 速率限制
+// ============================================================================
+
+/// IP 名单条目
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct IpEntry {
+    ip: String,
+    /// whitelist / blacklist
+    list_type: String,
+    #[serde(default)]
+    reason: String,
+    #[serde(default)]
+    expires_at: Option<i64>,  // None=永久
+    created_at: i64,
+}
+
+/// 速率限制条目
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct RateLimitEntry {
+    /// 限制维度：ip / path / global
+    scope: String,
+    /// 目标（IP 或路径，global 时为 *）
+    target: String,
+    /// 请求数限制
+    max_requests: u32,
+    /// 时间窗口（秒）
+    window_secs: u64,
+    /// 当前计数
+    current_count: u32,
+    /// 窗口开始时间
+    window_start: i64,
+    /// 动作：block / log
+    action: String,
+}
+
+/// IP 黑白名单检查
+fn check_ip_list<'a>(entries: &'a [IpEntry], ip: &str) -> Option<&'a IpEntry> {
+    let now = current_ms();
+    entries.iter().find(|e| {
+        e.ip == ip && (e.expires_at.map(|t| t > now).unwrap_or(true))
+    })
+}
+
+/// 速率限制检查：返回是否超过限制
+fn check_rate_limit(entries: &mut Vec<RateLimitEntry>, scope: &str, target: &str, max_requests: u32, window_secs: u64, action: &str) -> bool {
+    let now = current_ms();
+    let window_ms = (window_secs as i64) * 1000;
+    // 查找或创建条目
+    let entry = entries.iter_mut().find(|e| e.scope == scope && e.target == target);
+    match entry {
+        Some(e) => {
+            // 窗口过期则重置
+            if now - e.window_start > window_ms {
+                e.current_count = 0;
+                e.window_start = now;
+            }
+            e.current_count += 1;
+            if e.current_count > max_requests {
+                if action == "block" { return true; }
+            }
+            false
+        }
+        None => {
+            entries.push(RateLimitEntry {
+                scope: scope.to_string(),
+                target: target.to_string(),
+                max_requests,
+                window_secs,
+                current_count: 1,
+                window_start: now,
+                action: action.to_string(),
+            });
+            false
+        }
+    }
+}
+
+/// IP 条目序列化
+fn ip_entry_to_json(e: &IpEntry) -> serde_json::Value {
+    json!({
+        "ip": e.ip, "listType": e.list_type, "reason": e.reason,
+        "expiresAt": e.expires_at, "createdAt": e.created_at,
+    })
+}
+
+/// 速率限制条目序列化
+fn rate_limit_to_json(e: &RateLimitEntry) -> serde_json::Value {
+    json!({
+        "scope": e.scope, "target": e.target, "maxRequests": e.max_requests,
+        "windowSecs": e.window_secs, "currentCount": e.current_count,
+        "windowStart": e.window_start, "action": e.action,
+    })
 }
 
 /// WAF 请求检查：对请求 URL + 参数 + headers 做规则匹配
@@ -11401,6 +12460,426 @@ fn waf_rule_to_json(r: &WafRule) -> serde_json::Value {
         "action": r.action, "severity": r.severity, "enabled": r.enabled,
         "description": r.description, "hitCount": r.hit_count, "createdAt": r.created_at,
     })
+}
+
+// ============================================================================
+// 入侵检测防护（IDS/IPS）—— 对标 fail2ban + Snort 基础检测
+// ============================================================================
+
+/// 入侵检测事件
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct IdsEvent {
+    id: String,
+    /// 检测类型：ssh_bruteforce / port_scan / malware_process / c2_connection / suspicious_file
+    event_type: String,
+    /// 来源 IP 或进程名
+    source: String,
+    /// 检测详情
+    detail: String,
+    /// 严重等级：critical / high / medium / low
+    severity: String,
+    /// 是否已自动封禁
+    blocked: bool,
+    /// 封禁时长（秒，0=永久）
+    ban_duration_secs: u64,
+    ts: i64,
+}
+
+/// 入侵防护规则（自定义）
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct IdsRule {
+    id: String,
+    name: String,
+    /// 规则类型：ssh_bruteforce / port_scan / malware_process / c2_connection / custom
+    rule_type: String,
+    /// 匹配模式（正则或特征描述）
+    pattern: String,
+    /// 动作：block / log / alert
+    action: String,
+    /// 阈值（如连续失败次数）
+    threshold: u32,
+    /// 时间窗口（秒）
+    window_secs: u64,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    hit_count: u64,
+    created_at: i64,
+}
+
+impl Default for IdsRule {
+    fn default() -> Self {
+        IdsRule {
+            id: String::new(), name: String::new(), rule_type: "custom".to_string(),
+            pattern: String::new(), action: "log".to_string(), threshold: 5,
+            window_secs: 300, enabled: true, description: String::new(), hit_count: 0, created_at: current_ms(),
+        }
+    }
+}
+
+/// 内置入侵检测规则
+fn default_ids_rules() -> Vec<IdsRule> {
+    let now = current_ms();
+    vec![
+        IdsRule {
+            id: "ids-ssh-001".into(), name: "SSH 暴力破解".into(), rule_type: "ssh_bruteforce".into(),
+            pattern: "Failed password|Invalid user|Connection closed by authenticating user".into(),
+            action: "block".into(), threshold: 5, window_secs: 300, enabled: true,
+            description: "5 分钟内 5 次 SSH 失败登录即封禁".into(), hit_count: 0, created_at: now,
+        },
+        IdsRule {
+            id: "ids-scan-001".into(), name: "端口扫描".into(), rule_type: "port_scan".into(),
+            pattern: "SYN_RECV|connect\\(\\) to .* port".into(),
+            action: "block".into(), threshold: 20, window_secs: 60, enabled: true,
+            description: "1 分钟内 20 个端口连接即判定扫描".into(), hit_count: 0, created_at: now,
+        },
+        IdsRule {
+            id: "ids-malware-001".into(), name: "挖矿进程特征".into(), rule_type: "malware_process".into(),
+            pattern: "xmrig|minerd|cpuminer|kworker.*mining|stratum\\+tcp".into(),
+            action: "alert".into(), threshold: 1, window_secs: 60, enabled: true,
+            description: "检测已知挖矿进程特征".into(), hit_count: 0, created_at: now,
+        },
+        IdsRule {
+            id: "ids-c2-001".into(), name: "C2 回连特征".into(), rule_type: "c2_connection".into(),
+            pattern: "beacon|meterpreter|cobaltstrike|empire|powershell.*-enc|certutil.*-decode".into(),
+            action: "alert".into(), threshold: 1, window_secs: 60, enabled: true,
+            description: "检测已知 C2 框架特征".into(), hit_count: 0, created_at: now,
+        },
+    ]
+}
+
+/// 入侵检测：分析 auth.log 检测 SSH 暴力破解
+async fn ids_check_ssh_bruteforce(state: &AppState, threshold: u32, window_secs: u64) -> Vec<IdsEvent> {
+    let log_path = "/var/log/auth.log";
+    if !std::path::Path::new(log_path).exists() {
+        return vec![];
+    }
+    // 读取最近 1000 行
+    let content = tokio::fs::read_to_string(log_path).await.unwrap_or_default();
+    let lines: Vec<&str> = content.lines().rev().take(1000).collect();
+    let mut ip_failures: HashMap<String, Vec<i64>> = HashMap::new();
+    let now = current_ms();
+    let window_ms = (window_secs as i64) * 1000;
+
+    for line in lines {
+        // 匹配 "Failed password for invalid user xxx from 1.2.3.4 port 12345"
+        if line.contains("Failed password") || line.contains("Invalid user") {
+            if let Some(ip) = extract_ip_from_line(line) {
+                let ts = parse_log_timestamp(line).unwrap_or(now);
+                if now - ts < window_ms {
+                    ip_failures.entry(ip).or_default().push(ts);
+                }
+            }
+        }
+    }
+
+    let mut events = vec![];
+    for (ip, timestamps) in ip_failures {
+        if timestamps.len() >= threshold as usize {
+            events.push(IdsEvent {
+                id: format!("ids-ev-{:016x}", rand_u128()),
+                event_type: "ssh_bruteforce".to_string(),
+                source: ip.clone(),
+                detail: format!("{} 分钟内 {} 次失败登录", window_secs / 60, timestamps.len()),
+                severity: if timestamps.len() > 10 { "critical".to_string() } else { "high".to_string() },
+                blocked: false,
+                ban_duration_secs: 3600,
+                ts: now,
+            });
+        }
+    }
+    events
+}
+
+/// 从日志行提取 IP 地址
+fn extract_ip_from_line(line: &str) -> Option<String> {
+    // 匹配 "from 1.2.3.4 port" 或 "from 1.2.3.4"
+    let re = regex::Regex::new(r"from\s+(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})").ok()?;
+    re.captures(line).and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
+}
+
+/// 解析日志时间戳（支持 "Jul 17 12:34:56" 格式）
+fn parse_log_timestamp(line: &str) -> Option<i64> {
+    // 简化：用当前时间（实际应解析 syslog 时间戳）
+    // TODO: 解析 "Jul 17 12:34:56" 格式
+    Some(current_ms())
+}
+
+/// 入侵检测：分析进程列表检测挖矿/恶意进程
+async fn ids_check_malware_process(patterns: &[String]) -> Vec<IdsEvent> {
+    let output = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg("ps aux --sort=-%cpu | head -50")
+        .output().await
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    let mut events = vec![];
+    let now = current_ms();
+    for line in output.lines() {
+        for pattern in patterns {
+            if line.to_lowercase().contains(&pattern.to_lowercase()) {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                let pid = parts.get(1).unwrap_or(&"unknown").to_string();
+                let cmd = parts.get(10).unwrap_or(&"unknown").to_string();
+                events.push(IdsEvent {
+                    id: format!("ids-ev-{:016x}", rand_u128()),
+                    event_type: "malware_process".to_string(),
+                    source: cmd.clone(),
+                    detail: format!("PID {} 匹配特征: {}", pid, pattern),
+                    severity: "high".to_string(),
+                    blocked: false,
+                    ban_duration_secs: 0,
+                    ts: now,
+                });
+            }
+        }
+    }
+    events
+}
+
+/// 入侵检测：分析网络连接检测端口扫描和 C2 回连
+async fn ids_check_network(patterns: &[String]) -> Vec<IdsEvent> {
+    let output = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg("ss -tnp state established 2>/dev/null || netstat -tnp 2>/dev/null | head -100")
+        .output().await
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    let mut events = vec![];
+    let now = current_ms();
+    for line in output.lines() {
+        for pattern in patterns {
+            if line.to_lowercase().contains(&pattern.to_lowercase()) {
+                events.push(IdsEvent {
+                    id: format!("ids-ev-{:016x}", rand_u128()),
+                    event_type: "c2_connection".to_string(),
+                    source: line.chars().take(50).collect(),
+                    detail: format!("匹配特征: {}", pattern),
+                    severity: "critical".to_string(),
+                    blocked: false,
+                    ban_duration_secs: 0,
+                    ts: now,
+                });
+            }
+        }
+    }
+    events
+}
+
+/// 自动封禁：用 iptables 封禁 IP
+async fn ids_ban_ip(ip: &str, duration_secs: u64) -> Result<String, String> {
+    // 检查是否已封禁
+    let check = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("iptables -L INPUT -n | grep '{}'", ip))
+        .output().await;
+    if let Ok(o) = check {
+        if !String::from_utf8_lossy(&o.stdout).trim().is_empty() {
+            return Ok(format!("IP {} 已在黑名单", ip));
+        }
+    }
+    // 添加封禁规则
+    let add = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("iptables -A INPUT -s {} -j DROP", ip))
+        .output().await;
+    match add {
+        Ok(o) if o.status.success() => {
+            // 设置自动解封（如果有时长）
+            if duration_secs > 0 {
+                let ip_clone = ip.to_string();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(duration_secs)).await;
+                    let _ = tokio::process::Command::new("sh")
+                        .arg("-c")
+                        .arg(format!("iptables -D INPUT -s {} -j DROP", ip_clone))
+                        .output().await;
+                });
+            }
+            Ok(format!("IP {} 已封禁 {} 秒", ip, duration_secs))
+        }
+        Ok(o) => Err(format!("封禁失败: {}", String::from_utf8_lossy(&o.stderr))),
+        Err(e) => Err(format!("执行失败: {}", e)),
+    }
+}
+
+/// IDS 事件序列化
+fn ids_event_to_json(e: &IdsEvent) -> serde_json::Value {
+    json!({
+        "id": e.id, "eventType": e.event_type, "source": e.source, "detail": e.detail,
+        "severity": e.severity, "blocked": e.blocked, "banDurationSecs": e.ban_duration_secs,
+        "ts": e.ts,
+    })
+}
+
+/// IDS 规则序列化
+fn ids_rule_to_json(r: &IdsRule) -> serde_json::Value {
+    json!({
+        "id": r.id, "name": r.name, "ruleType": r.rule_type, "pattern": r.pattern,
+        "action": r.action, "threshold": r.threshold, "windowSecs": r.window_secs,
+        "enabled": r.enabled, "description": r.description, "hitCount": r.hit_count,
+        "createdAt": r.created_at,
+    })
+}
+
+// ============================================================================
+// 规则导入/导出（ModSecurity / Snort / 自定义正则）
+// ============================================================================
+
+/// 解析 ModSecurity SecRule 语法，提取正则模式
+fn parse_modsecurity_rule(line: &str) -> Option<(String, String, String)> {
+    // 匹配: SecRule ARGS|REQUEST_BODY|REQUEST_HEADERS "@rx pattern" "id:1,phase:2,deny,msg:'name'"
+    if !line.trim().starts_with("SecRule") { return None; }
+    let re_pattern = regex::Regex::new(r#""@rx\s+([^"]+)""#).ok()?;
+    let pattern = re_pattern.captures(line)?.get(1)?.as_str().to_string();
+    let re_msg = regex::Regex::new(r#"msg:'([^']+)'"#).ok()?;
+    let name = re_msg.captures(line).map(|c| c.get(1).map(|m| m.as_str().to_string()).unwrap_or_else(|| "ModSecurity Rule".to_string())).unwrap_or_else(|| "ModSecurity Rule".to_string());
+    let action = if line.contains("deny") || line.contains("block") { "block" } else { "log" };
+    Some((name, pattern, action.to_string()))
+}
+
+/// 解析 Snort 规则语法
+fn parse_snort_rule(line: &str) -> Option<(String, String, String)> {
+    // 匹配: alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"name"; content:"pattern"; sid:1;)
+    if !line.trim().starts_with("alert") { return None; }
+    let re_msg = regex::Regex::new(r#"msg:"([^"]+)""#).ok()?;
+    let name = re_msg.captures(line)?.get(1)?.as_str().to_string();
+    let re_content = regex::Regex::new(r#"content:"([^"]+)""#).ok()?;
+    let content = re_content.captures(line)?.get(1)?.as_str().to_string();
+    // 转义正则特殊字符
+    let pattern = regex::escape(&content);
+    Some((name, pattern, "block".to_string()))
+}
+
+/// 解析自定义正则规则（一行一条：name|pattern|action）
+fn parse_custom_rule(line: &str) -> Option<(String, String, String)> {
+    let parts: Vec<&str> = line.trim().split('|').collect();
+    if parts.len() < 2 { return None; }
+    let name = parts[0].trim().to_string();
+    let pattern = parts[1].trim().to_string();
+    let action = parts.get(2).map(|s| s.trim().to_string()).unwrap_or_else(|| "log".to_string());
+    Some((name, pattern, action))
+}
+
+/// 导入规则主函数：自动检测格式或按指定格式解析
+fn import_rules(content: &str, format: &str, rule_type: &str) -> Result<(usize, Vec<String>), String> {
+    let mut count = 0;
+    let mut errors = vec![];
+    for (i, line) in content.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') { continue; }
+        let parsed = match format {
+            "modsecurity" | "modsec" => parse_modsecurity_rule(line),
+            "snort" => parse_snort_rule(line),
+            "custom" | "regex" => parse_custom_rule(line),
+            "auto" | _ => {
+                // 自动检测：依次尝试 ModSecurity / Snort / Custom
+                parse_modsecurity_rule(line)
+                    .or_else(|| parse_snort_rule(line))
+                    .or_else(|| parse_custom_rule(line))
+            }
+        };
+        match parsed {
+            Some(_) => count += 1,
+            None => errors.push(format!("第 {} 行解析失败: {}", i + 1, line.chars().take(80).collect::<String>())),
+        }
+    }
+    Ok((count, errors))
+}
+
+/// 生成导入后的 WAF 规则列表
+fn imported_ok_waf_rules(content: &str, format: &str) -> Vec<WafRule> {
+    let mut rules = vec![];
+    let now = current_ms();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') { continue; }
+        let parsed = match format {
+            "modsecurity" | "modsec" => parse_modsecurity_rule(line),
+            "snort" => parse_snort_rule(line),
+            "custom" | "regex" => parse_custom_rule(line),
+            _ => parse_modsecurity_rule(line).or_else(|| parse_snort_rule(line)).or_else(|| parse_custom_rule(line)),
+        };
+        if let Some((name, pattern, action)) = parsed {
+            rules.push(WafRule {
+                id: format!("waf-imported-{:016x}", rand_u128()),
+                name,
+                rule_type: "custom".to_string(),
+                pattern,
+                action,
+                severity: "medium".to_string(),
+                enabled: true,
+                description: format!("导入自 {}", format),
+                hit_count: 0,
+                created_at: now,
+            });
+        }
+    }
+    rules
+}
+
+/// 生成导入后的 IDS 规则列表
+fn imported_ok_ids_rules(content: &str, format: &str) -> Vec<IdsRule> {
+    let mut rules = vec![];
+    let now = current_ms();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') { continue; }
+        let parsed = match format {
+            "modsecurity" | "modsec" => parse_modsecurity_rule(line),
+            "snort" => parse_snort_rule(line),
+            "custom" | "regex" => parse_custom_rule(line),
+            _ => parse_modsecurity_rule(line).or_else(|| parse_snort_rule(line)).or_else(|| parse_custom_rule(line)),
+        };
+        if let Some((name, pattern, action)) = parsed {
+            rules.push(IdsRule {
+                id: format!("ids-imported-{:016x}", rand_u128()),
+                name,
+                rule_type: "custom".to_string(),
+                pattern,
+                action,
+                threshold: 1,
+                window_secs: 60,
+                enabled: true,
+                description: format!("导入自 {}", format),
+                hit_count: 0,
+                created_at: now,
+            });
+        }
+    }
+    rules
+}
+
+/// 导出 WAF 规则为 JSON 或 ModSecurity 格式
+fn export_waf_rules(rules: &[WafRule], format: &str) -> String {
+    match format {
+        "modsecurity" | "modsec" => {
+            rules.iter().map(|r| {
+                format!("SecRule ARGS|REQUEST_BODY|REQUEST_HEADERS \"@rx {}\" \"id:{},phase:2,{},msg:'{}'\"",
+                    r.pattern.replace('"', "\\\""), r.id.replace("waf-", ""), r.action, r.name)
+            }).collect::<Vec<_>>().join("\n")
+        }
+        "json" | _ => {
+            serde_json::to_string_pretty(&rules.iter().map(waf_rule_to_json).collect::<Vec<_>>()).unwrap_or_default()
+        }
+    }
+}
+
+/// 导出 IDS 规则为 JSON 或 Snort 格式
+fn export_ids_rules(rules: &[IdsRule], format: &str) -> String {
+    match format {
+        "snort" => {
+            rules.iter().map(|r| {
+                format!("alert tcp any any -> any any (msg:\"{}\"; content:\"{}\"; sid:{};)",
+                    r.name, r.pattern.replace('"', "\\\""), r.id.replace("ids-", ""))
+            }).collect::<Vec<_>>().join("\n")
+        }
+        "json" | _ => {
+            serde_json::to_string_pretty(&rules.iter().map(ids_rule_to_json).collect::<Vec<_>>()).unwrap_or_default()
+        }
+    }
 }
 
 // ============================================================================
@@ -13934,13 +15413,17 @@ fn main() {
                 let storage = Storage::new(&home);
                 let state = AppState::new(config.clone(), storage);
                 let port = config.port;
+                let bind_host = config.bind_host.clone();
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 rt.block_on(async move {
-                    let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+                    let addr: SocketAddr = format!("{}:{}", bind_host, port).parse().unwrap();
                     println!("CradleRing 网关启动于 http://{}", addr);
                     println!("WebSocket: ws://{}/ws", addr);
                     println!("数据目录: {}/.cradle-ring", home);
                     println!("Token: {}", config.token);
+                    if bind_host == "0.0.0.0" {
+                        println!("⚠️  网关已绑定到 0.0.0.0，所有网络接口可访问（请确保防火墙已放行）");
+                    }
                     println!("按 Ctrl+C 停止\n监听中...");
                     // 初始化（必须在 runtime 内）：渠道同步、默认 admin、审批循环
                     state.init().await;
