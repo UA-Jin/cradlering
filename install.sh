@@ -532,7 +532,7 @@ run_onboarding() {
     # ===== 1b. Embedding 配置（记忆系统用）=====
     ui_step "【1b/4】Embedding 配置（记忆系统向量检索用）"
     echo "  1) 本地模型 BAAI/bge-small-zh-v1.5（零成本，自动下载 ~100MB，需 ~1GB 内存）"
-    echo "  2) 硅基流动 SiliconFlow API（需 API Key，按量计费，速度快）"
+    echo "  2) 硅基流动 SiliconFlow API（默认 Qwen/Qwen3-VL-Embedding-8B，需 API Key，按量计费，速度快）"
     echo "  3) 跳过（稍后手动配置，记忆系统暂不可用）"
     read -p "选择 Embedding [1-3，默认 1]: " embedding_choice </dev/tty
     embedding_choice="${embedding_choice:-1}"
@@ -543,7 +543,7 @@ run_onboarding() {
            embedding_model="BAAI/bge-small-zh-v1.5"
            ui_info "已选择本地 Embedding（首次使用时自动下载模型，约 100MB）" ;;
         2) embedding_provider="siliconflow"
-           embedding_model="BAAI/bge-large-zh-v1.5"
+           embedding_model="Qwen/Qwen3-VL-Embedding-8B"
            embedding_url="https://api.siliconflow.cn/v1"
            read -p "硅基流动 API Key (sk-...): " embedding_key </dev/tty
            if [[ -z "$embedding_key" ]]; then
@@ -660,6 +660,7 @@ EOCFG
     echo ""
     ui_info "配置摘要:"
     [[ -n "$provider_name" ]] && ui_info "  模型: $provider_name / $provider_model"
+    [[ -n "$embedding_provider" ]] && ui_info "  Embedding: $embedding_provider / $embedding_model"
     ui_info "  绑定: $bind_host"
     ui_info "  渠道: $(echo "$channels_choice" | tr -d '\n')"
     ui_info "  Token: $token"
