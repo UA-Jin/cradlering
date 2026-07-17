@@ -42,7 +42,7 @@ impl SafeStreamWriter {
         }
     }
 
-    fn handle_error(&mut self, err: &std::io::Error, fd: i32, label: &str) -> bool {
+    fn handle_error(&mut self, err: &std::io::Error, _fd: i32, label: &str) -> bool {
         let raw = err.raw_os_error().unwrap_or(0);
         if is_broken_pipe_error(raw) {
             self.closed = true;

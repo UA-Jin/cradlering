@@ -497,7 +497,7 @@ fn tokenize_blocks(markdown: &str, table_mode: MarkdownTableMode) -> Vec<Markdow
     let mut out: Vec<MarkdownToken> = Vec::new();
     let lines: Vec<&str> = markdown.split('\n').collect();
     let mut i = 0usize;
-    let mut list_stack: Vec<(String, usize, bool)> = Vec::new(); // (type, level_or_indent, ordered)
+    let _list_stack: Vec<(String, usize, bool)> = Vec::new(); // (type, level_or_indent, ordered)
     while i < lines.len() {
         let line = lines[i];
         let trimmed_start = line.trim_start();
@@ -611,7 +611,7 @@ fn tokenize_blocks(markdown: &str, table_mode: MarkdownTableMode) -> Vec<Markdow
 
         // list
         if is_list_item(trimmed_start) {
-            let (ordered, marker_len) = if is_ordered_list_item(trimmed_start) {
+            let (ordered, _marker_len) = if is_ordered_list_item(trimmed_start) {
                 (true, find_ordered_marker_len(trimmed_start))
             } else {
                 (false, 1)
@@ -1457,7 +1457,7 @@ fn render_table_as_code(state: &mut RenderState) {
 
     {
         let widths = &widths;
-        let mut render_row = |cells: &[TableCell], state: &mut RenderState| {
+        let render_row = |cells: &[TableCell], state: &mut RenderState| {
             state.target.text.push('|');
             for (i, width) in widths.iter().enumerate() {
                 state.target.text.push(' ');

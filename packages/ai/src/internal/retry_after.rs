@@ -105,7 +105,8 @@ fn parse_http_date_calendar_ms(
     }
 }
 
-fn Number_is_integer_i32(year: i32) -> bool {
+#[allow(non_snake_case)]
+fn Number_is_integer_i32(_year: i32) -> bool {
     true
 }
 

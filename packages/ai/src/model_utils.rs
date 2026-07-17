@@ -4,7 +4,7 @@
 use llm_core::model_contracts::anthropic::{
     requires_claude_mandatory_adaptive_thinking, resolve_claude_native_thinking_level_map,
 };
-use llm_core::types::{Api, Model, ModelThinkingLevel, Usage};
+use llm_core::types::{Model, ModelThinkingLevel, Usage};
 
 /// Calculates and stores model cost fields from token usage and per-million pricing.
 pub fn calculate_cost(model: &Model, usage: &mut Usage) -> UsageCost {

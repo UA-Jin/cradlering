@@ -148,7 +148,7 @@ pub fn format_acp_error_chain(error: &(dyn std::fmt::Debug + 'static)) -> String
 /// Wraps async runtime work and rethrows failures as ACP runtime errors.
 pub async fn with_acp_runtime_error_boundary<F, T>(
     fallback_code: &'static str,
-    fallback_message: &'static str,
+    _fallback_message: &'static str,
     run: F,
 ) -> Result<T, AcpRuntimeError>
 where

@@ -14,7 +14,7 @@ pub struct FirstEventStreamOptions {
 pub fn build_base_options(
     _model: &Model,
     options: Option<&SimpleStreamOptions>,
-    api_key: Option<&str>,
+    _api_key: Option<&str>,
 ) -> StreamOptions {
     let options = options.cloned().unwrap_or_default();
     let first_event = FirstEventStreamOptions {

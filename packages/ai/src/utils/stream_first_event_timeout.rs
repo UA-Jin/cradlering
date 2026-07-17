@@ -5,7 +5,6 @@
 //! `first_event_timeout_ms`, the consumer is notified via a deadline
 //! callback. Useful for surfacing dead-stream conditions early.
 
-use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -16,6 +15,7 @@ use tokio::sync::mpsc;
 /// Wrapper stream that adds a first-event timeout.
 pub struct FirstEventTimeoutStream {
     rx: mpsc::UnboundedReceiver<AssistantMessageEvent>,
+    #[allow(dead_code)]
     timeout: Duration,
     timed_out: bool,
     deadline_hit: bool,

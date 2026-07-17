@@ -23,6 +23,7 @@ fn normalize_identity_source(value: &Value) -> Option<SessionAcpIdentitySource> 
     }
 }
 
+#[allow(dead_code)]
 fn identity_to_value(s: Option<&str>) -> Value {
     match s {
         Some(v) => Value::String(v.to_string()),

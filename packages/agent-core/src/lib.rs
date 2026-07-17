@@ -4,6 +4,8 @@
 //! Public agent-core package surface: agent loop, harness, session storage,
 //! compaction, execution envs, and utility helpers.
 
+#![allow(ambiguous_glob_reexports)]
+
 pub mod agent;
 pub mod agent_loop;
 pub mod errors;
@@ -22,4 +24,3 @@ pub use llm::*;
 pub use reasoning::*;
 pub use runtime_deps::*;
 pub use types::*;
-pub use validation::*;

@@ -8,6 +8,7 @@ pub mod retry_after;
 pub mod runtime;
 pub mod shared;
 
+#[allow(ambiguous_glob_reexports)]
 pub use anthropic::*;
 pub use default_runtime::*;
 pub use openai::*;

@@ -10,22 +10,23 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::event_hub::{EventHub, EventHubOptions};
-use crate::normalize::normalize_gateway_event;
 use crate::transport::{
     GatewayClientFactory, GatewayClientLike, GatewayClientTransport, GatewayClientTransportOptions,
 };
 use crate::types::{
     AgentRunParams, AgentsCreateParams, AgentsDeleteParams, AgentsUpdateParams,
-    ApprovalDecisionParams, ArtifactQuery, ArtifactSummary, ArtifactsDownloadResult,
+    ApprovalDecisionParams, ArtifactQuery, ArtifactsDownloadResult,
     ArtifactsGetResult, ArtifactsListResult, ConnectableOpenClawTransport, EnvironmentCreateParams,
     EnvironmentSummary, EnvironmentsListResult, GatewayEvent, GatewayRequestOptions,
     OpenClawEvent, OpenClawTransport, RunCreateParams, RunResult, RunStatus, RunTimestamp,
-    RuntimeSelection, SDKError, SDKMessage, SessionCreateParams, SessionSendParams, SessionTarget,
+    SDKError, SessionCreateParams, SessionSendParams, SessionTarget,
     TasksCancelResult, TasksGetResult, TasksListParams, TasksListResult, ToolInvokeParams,
     ToolInvokeResult, ToolsEffectiveParams,
 };
 
+#[allow(dead_code)]
 const MAX_REPLAY_RUNS: usize = 100;
+#[allow(dead_code)]
 const MAX_REPLAY_EVENTS_PER_RUN: usize = 500;
 const MAX_NORMALIZED_REPLAY_EVENTS: usize = 2000;
 
@@ -70,12 +71,14 @@ fn resolve_gateway_url(options: &OpenClawOptions) -> Option<String> {
     None
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ChatProjectionState {
     Delta,
     Final,
 }
 
+#[allow(dead_code)]
 struct ChatProjection {
     state: ChatProjectionState,
     payload: serde_json::Map<String, Value>,
@@ -345,6 +348,7 @@ fn require_tools_effective_session_key(params: Value) -> Result<Value, SDKError>
     Ok(params)
 }
 
+#[allow(dead_code)]
 fn is_assistant_run_event(event: &OpenClawEvent) -> bool {
     matches!(
         event.r#type,
@@ -353,6 +357,7 @@ fn is_assistant_run_event(event: &OpenClawEvent) -> bool {
     )
 }
 
+#[allow(dead_code)]
 fn is_terminal_run_event(event: &OpenClawEvent) -> bool {
     matches!(
         event.r#type,
@@ -363,6 +368,7 @@ fn is_terminal_run_event(event: &OpenClawEvent) -> bool {
     )
 }
 
+#[allow(dead_code)]
 fn read_chat_projection(event: &OpenClawEvent) -> Option<ChatProjection> {
     let raw = event.raw.as_ref()?;
     if event.r#type != crate::types::OpenClawEventType::Raw || raw.event != "chat" {
@@ -381,6 +387,7 @@ fn read_chat_projection(event: &OpenClawEvent) -> Option<ChatProjection> {
     Some(ChatProjection { state, payload })
 }
 
+#[allow(dead_code)]
 fn read_chat_projection_text(payload: &serde_json::Map<String, Value>) -> Option<String> {
     let message = match payload.get("message") {
         Some(v) => as_record(v),
@@ -409,6 +416,7 @@ fn read_chat_projection_text(payload: &serde_json::Map<String, Value>) -> Option
     }
 }
 
+#[allow(dead_code)]
 fn read_chat_projection_delta_text(payload: &serde_json::Map<String, Value>) -> Option<String> {
     payload
         .get("deltaText")
@@ -416,10 +424,12 @@ fn read_chat_projection_delta_text(payload: &serde_json::Map<String, Value>) -> 
         .map(|s| s.to_string())
 }
 
+#[allow(dead_code)]
 fn read_chat_projection_replace(payload: &serde_json::Map<String, Value>) -> bool {
     payload.get("replace") == Some(&Value::Bool(true))
 }
 
+#[allow(dead_code)]
 fn normalize_chat_projection_event(
     event: &OpenClawEvent,
     projection: &ChatProjection,
@@ -472,7 +482,9 @@ pub struct OpenClaw {
     pub approvals: ApprovalsNamespace,
     pub environments: EnvironmentsNamespace,
     transport: Arc<dyn OpenClawTransport>,
+    #[allow(dead_code)]
     normalized_events: EventHub<OpenClawEvent>,
+    #[allow(dead_code)]
     replay_by_run_id: Arc<Mutex<BTreeMap<String, Vec<OpenClawEvent>>>>,
     closed: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -577,6 +589,7 @@ impl OpenClaw {
         self.transport.events(filter)
     }
 
+    #[allow(dead_code)]
     fn record_replay_event(&self, event: &OpenClawEvent) {
         let Some(run_id) = &event.run_id else {
             return;
@@ -1372,6 +1385,7 @@ impl EnvironmentsNamespace {
 /// Placeholder gateway client used when no concrete factory is provided.
 /// Hosts should install a real websocket-backed implementation.
 pub struct NoopGatewayClient {
+    #[allow(dead_code)]
     options: GatewayClientTransportOptions,
 }
 

@@ -39,7 +39,9 @@ pub mod tool_result_text;
 pub mod tool_schema_json_projection;
 pub mod transform_messages;
 
+#[allow(ambiguous_glob_reexports)]
 pub use agent_tools_parameter_schema::*;
+#[allow(ambiguous_glob_reexports)]
 pub use anthropic::*;
 pub use anthropic_auth_headers::*;
 pub use anthropic_model_contract::*;
@@ -56,7 +58,6 @@ pub use clean_for_gemini::*;
 pub use cloudflare::*;
 pub use github_copilot_headers::*;
 pub use google::*;
-pub use google_shared::*;
 pub use google_vertex::*;
 pub use mistral::*;
 pub use openai_chatgpt_responses::*;
@@ -64,7 +65,6 @@ pub use openai_completions::*;
 pub use openai_prompt_cache::*;
 pub use openai_reasoning_effort::*;
 pub use openai_responses::*;
-pub use openai_responses_shared::*;
 pub use openai_responses_stream_compat::*;
 pub use openai_responses_tools::*;
 pub use openai_stop_reason::*;

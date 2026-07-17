@@ -225,7 +225,7 @@ install_cradle_ring() {
     # curl|bash 模式：自动从 GitHub 克隆源码
     if is_curl_bash_mode; then
         echo -e "${INFO}检测到 curl|bash 模式，自动下载源码...${NC}" >&2
-        src_dir="$(clone_source)"; echo "DEBUG: src_dir=[$src_dir]" >&2
+        src_dir="$(clone_source)"
         TMPFILES+=("$src_dir")
         SRC_DIR="$src_dir"  # 保存到全局变量，供后续步骤使用
     fi

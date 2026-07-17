@@ -602,7 +602,7 @@ fn box_chars(border: BorderKind) -> BoxChars {
 }
 
 pub fn render_table(opts: RenderTableOptions) -> String {
-    let mut rows: Vec<std::collections::BTreeMap<String, String>> = opts
+    let rows: Vec<std::collections::BTreeMap<String, String>> = opts
         .rows
         .into_iter()
         .map(|row| {
@@ -677,7 +677,7 @@ pub fn render_table(opts: RenderTableOptions) -> String {
     let absolute_min_widths: Vec<usize> = columns
         .iter()
         .enumerate()
-        .map(|(i, c)| {
+        .map(|(i, _c)| {
             let (header_w, _) = metrics[i];
             std::cmp::max(header_w + padding * 2, 3)
         })
@@ -690,7 +690,7 @@ pub fn render_table(opts: RenderTableOptions) -> String {
                 let mut v: Vec<(usize, usize)> = columns
                     .iter()
                     .enumerate()
-                    .map(|(i, c)| (i, widths[i]))
+                    .map(|(i, _c)| (i, widths[i]))
                     .filter(|(i, _)| columns[*i].flex)
                     .collect();
                 v.sort_by(|a, b| b.1.cmp(&a.1));
@@ -700,7 +700,7 @@ pub fn render_table(opts: RenderTableOptions) -> String {
                 let mut v: Vec<(usize, usize)> = columns
                     .iter()
                     .enumerate()
-                    .map(|(i, c)| (i, widths[i]))
+                    .map(|(i, _c)| (i, widths[i]))
                     .filter(|(i, _)| !columns[*i].flex)
                     .collect();
                 v.sort_by(|a, b| b.1.cmp(&a.1));

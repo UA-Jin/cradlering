@@ -68,6 +68,7 @@ fn rgb_from_hex(hex: &str) -> String {
 
 static RICH_LEVEL: AtomicI32 = AtomicI32::new(-1);
 
+#[allow(dead_code)]
 fn base_colorizer() -> Box<dyn Colorizer> {
     if RICH_LEVEL.load(Ordering::SeqCst) > 0 {
         Box::new(HexColorizer)

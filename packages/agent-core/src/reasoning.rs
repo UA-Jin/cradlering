@@ -6,8 +6,6 @@ use llm_core::model_contracts::anthropic::{
 };
 use llm_core::types::{Model, SimpleStreamOptions};
 
-use crate::types::ThinkingLevel;
-
 const ENABLED_THINKING_LEVELS: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max"];
 
 fn is_enabled_thinking_level(value: &str) -> bool {

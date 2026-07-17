@@ -9,14 +9,6 @@ use llm_core::types::{
     StreamOptions,
 };
 
-use crate::providers::openai_prompt_cache::clamp_openai_prompt_cache_key;
-use crate::providers::openai_reasoning_effort::{
-    normalize_openai_reasoning_effort, resolve_openai_api_reasoning_effort,
-};
-use crate::providers::openai_stop_reason::map_openai_stop_reason;
-use crate::providers::openai_tool_projection::project_openai_tools;
-use crate::providers::openai_tool_schema::normalize_strict_openai_json_schema;
-
 /// Streams an OpenAI Completions request.
 pub fn stream_openai_completions(
     _model: Model,

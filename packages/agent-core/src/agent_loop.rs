@@ -44,7 +44,7 @@ pub async fn run_agent_loop(
     runtime: Option<Box<dyn StreamSimpleOnly>>,
 ) -> Vec<AgentMessage> {
     let mut new_messages = prompts.clone();
-    let mut current_context = AgentContext {
+    let current_context = AgentContext {
         system_prompt: context.system_prompt,
         messages: {
             let mut v = context.messages;
@@ -83,7 +83,7 @@ pub async fn run_agent_loop_continue(
     }
 
     let mut new_messages: Vec<AgentMessage> = vec![];
-    let mut current_context = context;
+    let current_context = context;
     let _ = emit(AgentEvent::AgentStart);
     let _ = emit(AgentEvent::TurnStart);
     run_loop(current_context, &mut new_messages, config, signal, emit, stream_fn, runtime).await;
@@ -93,7 +93,7 @@ pub async fn run_agent_loop_continue(
 async fn run_loop(
     mut current_context: AgentContext,
     new_messages: &mut Vec<AgentMessage>,
-    mut config: Box<dyn AgentLoopConfig>,
+    config: Box<dyn AgentLoopConfig>,
     signal: Option<AbortSignalShim>,
     emit: AgentEventSink,
     stream_fn: Option<StreamFn>,
@@ -239,7 +239,7 @@ async fn stream_assistant_response(
     let messages = context.messages.clone();
     let llm_messages = config.convert_to_llm(messages).await;
 
-    let llm_context = Context {
+    let _llm_context = Context {
         system_prompt: Some(context.system_prompt.clone()),
         messages: llm_messages,
         tools: None,

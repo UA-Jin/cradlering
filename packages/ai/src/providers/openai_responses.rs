@@ -9,12 +9,6 @@ use llm_core::types::{
     StreamOptions,
 };
 
-use crate::providers::openai_responses_stream_compat::{
-    is_responses_text_content_part_type, resolve_responses_message_snapshot_collapse,
-};
-use crate::providers::openai_responses_tools::normalize_responses_tools;
-use crate::providers::openai_tool_schema::normalize_strict_openai_json_schema;
-
 /// Streams an OpenAI Responses API request.
 pub fn stream_openai_responses(
     _model: Model,

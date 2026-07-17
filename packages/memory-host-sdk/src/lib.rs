@@ -14,5 +14,4 @@ pub use host::*;
 pub use multimodal::*;
 pub use query::*;
 pub use runtime::*;
-pub use secret::*;
 pub use status::*;

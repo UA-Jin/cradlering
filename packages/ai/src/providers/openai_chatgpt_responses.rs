@@ -10,10 +10,6 @@ use llm_core::types::{
 };
 
 use crate::providers::openai_responses_shared as shared;
-use crate::providers::openai_responses_stream_compat::{
-    is_responses_text_content_part_type, is_responses_text_delta_event_type,
-};
-use crate::utils::oauth::openai_chatgpt_jwt::sign_chatgpt_jwt;
 
 /// Streams a ChatGPT-Responses request.
 pub fn stream_openai_codex_responses(

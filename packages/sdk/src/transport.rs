@@ -42,6 +42,7 @@ pub struct GatewayClientTransportOptions {
     pub on_gap: Option<OnGapCb>,
 }
 
+#[allow(dead_code)]
 fn to_gateway_event(event: &Value) -> GatewayEvent {
     let record = match event {
         Value::Object(m) => m.clone(),

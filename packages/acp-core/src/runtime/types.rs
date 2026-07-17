@@ -5,7 +5,6 @@ use std::collections::HashMap;
 
 use async_stream::stream;
 use futures_core::Stream;
-use futures_util::stream::StreamExt;
 
 use crate::types::AbortSignal;
 

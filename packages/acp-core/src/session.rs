@@ -54,7 +54,7 @@ pub fn create_in_memory_session_store(options: AcpSessionStoreOptions) -> impl A
     InMemorySessionStore::new(options)
 }
 
-struct InMemorySessionStore {
+pub struct InMemorySessionStore {
     max_sessions: i64,
     idle_ttl_ms: i64,
     now: fn() -> i64,

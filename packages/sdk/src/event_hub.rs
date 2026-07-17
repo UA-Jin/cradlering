@@ -46,6 +46,7 @@ impl WakeFlag {
             s = self.cv.wait(s).unwrap();
         }
     }
+    #[allow(dead_code)]
     fn try_take(&self) -> bool {
         let mut s = self.state.lock().unwrap();
         if *s {

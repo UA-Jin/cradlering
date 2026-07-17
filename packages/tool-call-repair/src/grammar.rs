@@ -57,7 +57,7 @@ pub fn skip_line_indentation(text: &str, start: usize) -> usize {
     while index < bytes.len() {
         let b = bytes[index];
         // JavaScript regex /[^\S\r\n]/u - whitespace that is not \r or \n
-        if (b == b' ' || b == b'\t' || b == 0x0b || b == 0x0c) {
+        if b == b' ' || b == b'\t' || b == 0x0b || b == 0x0c {
             index += 1;
         } else {
             break;
@@ -289,8 +289,8 @@ pub fn scan_xmlish_tool_call(
 ) -> XmlishToolCallScan {
     let start = start.unwrap_or(0);
     let mut cursor = start;
-    let mut syntax: XmlishSyntax = XmlishSyntax::Function;
-    let mut name: XmlishToolCallSpan = XmlishToolCallSpan { start: 0, end: 0 };
+    let mut syntax: XmlishSyntax;
+    let mut name: XmlishToolCallSpan;
 
     if char_at(text, cursor) == Some('<') {
         if !starts_with_ascii_marker_ignore_case(text, cursor, FUNCTION_OPEN)

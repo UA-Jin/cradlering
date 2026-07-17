@@ -731,7 +731,7 @@ pub fn scan_plain_text_tool_call(
 
     let allowed_json = |json: &PlainTextJsonToolCallScan| -> (bool, Option<PlainTextJsonToolCallSpan>) {
         let value = match json {
-            PlainTextJsonToolCallScan::Complete { name, payload, .. } => {
+            PlainTextJsonToolCallScan::Complete { name: _, payload, .. } => {
                 return (
                     true,
                     Some(PlainTextJsonToolCallSpan {
@@ -1072,6 +1072,7 @@ pub fn parse_standalone_plain_text_tool_call_blocks(
     let mut blocks: Vec<PlainTextToolCallBlock> = Vec::new();
     let normalized_options = normalize_parse_options(options);
     let mut cursor = skip_whitespace(text, 0);
+    #[allow(unused_assignments)]
     let mut owned_breaks: Option<StructuralLineBreakOptions> = None;
     let mut breaks_ref: Option<&mut StructuralLineBreakOptions> = None;
     if let Some(slb) = structural_line_breaks {
@@ -1141,7 +1142,7 @@ pub fn strip_plain_text_tool_call_blocks(text: &str) -> String {
             }
             _ => {}
         }
-        let mut block_end = match &scan {
+        let block_end = match &scan {
             PlainTextToolCallScan::Complete { end, .. } => Some(*end),
             PlainTextToolCallScan::Prefix { complete_end, .. } => *complete_end,
             _ => None,
@@ -1245,6 +1246,7 @@ fn regex_function_check(text: &str) -> bool {
     false
 }
 
+#[allow(dead_code)]
 struct NoopMatcher;
 impl PlainTextToolCallNameMatcher for NoopMatcher {
     fn has_exact_name(&self, _name: &str) -> bool {

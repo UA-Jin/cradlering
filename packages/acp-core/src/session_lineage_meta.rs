@@ -38,6 +38,7 @@ pub struct AcpSessionLineageRow {
     pub spawned_cwd: Option<String>,
 }
 
+#[allow(dead_code)]
 fn read_integer(value: &Value) -> Option<i64> {
     let n = value.as_i64()?;
     if n >= 0 {

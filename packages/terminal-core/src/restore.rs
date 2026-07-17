@@ -16,7 +16,7 @@ pub struct RestoreTerminalStateOptions {
 fn report_restore_failure(scope: &str, err: &dyn std::error::Error, reason: Option<&str>) {
     let suffix = reason.map(|r| format!(" ({})", r)).unwrap_or_default();
     let message = format!("[terminal] restore {} failed{}: {}", scope, suffix, err);
-    let mut stderr = std::io::stderr();
+    let stderr = std::io::stderr();
     use std::io::Write;
     let _ = writeln!(stderr.lock(), "{}", message);
 }

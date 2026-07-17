@@ -14,25 +14,6 @@ use llm_core::types::{
     StreamOptions,
 };
 
-use crate::providers::anthropic_auth_headers::{
-    omit_foundry_bearer_credential_headers, uses_foundry_bearer_auth,
-};
-use crate::providers::anthropic_model_contract::{
-    requires_claude_adaptive_thinking, resolve_model_bound_thinking_replay_mode,
-};
-use crate::providers::anthropic_refusal::{
-    apply_anthropic_refusal, AnthropicRefusalOutput,
-};
-use crate::providers::anthropic_server_fallback::{
-    apply_anthropic_fallback_boundary, build_anthropic_server_side_fallbacks,
-    read_anthropic_fallback_boundary, AnthropicFallbackBoundary, AnthropicFallbackOutput,
-};
-use crate::providers::anthropic_thinking_replay::find_active_anthropic_tool_turn_assistant_index;
-use crate::providers::anthropic_usage::{
-    parse_anthropic_usage_payload, read_anthropic_prompt_usage_snapshot,
-    AnthropicPromptUsageSnapshot,
-};
-
 /// Streams a full Anthropic Messages request.
 pub fn stream_anthropic(
     _model: Model,

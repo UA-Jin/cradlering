@@ -5,7 +5,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use async_stream::try_stream;
 use futures_core::Stream;
 use serde_json::{Map, Value as JsonValue};
 
@@ -62,6 +61,7 @@ pub struct NormalizeTerminalMessageParams {
 }
 
 const MAX_PAYLOAD_BYTES: usize = 256_000;
+#[allow(dead_code)]
 const MAX_PENDING_EVENTS: usize = 256;
 const MAX_TOOL_NAME_CHARS: usize = 120;
 
@@ -109,6 +109,7 @@ struct JsonSuppressor {
     required_closing: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct OpeningSuppressor {
     allow_xml: bool,
@@ -117,12 +118,14 @@ struct OpeningSuppressor {
     json: JsonSuppressor,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 enum SuppressorChoice {
     Json(JsonSuppressor),
     Xml(XmlSuppressor),
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 enum OverCapSuppressor {
     Json(JsonSuppressor),
@@ -130,6 +133,7 @@ enum OverCapSuppressor {
     Xml(XmlSuppressor),
 }
 
+#[allow(dead_code)]
 struct CandidatePendingState {
     buffer: String,
     buffer_bytes: usize,
@@ -142,6 +146,7 @@ struct CandidatePendingState {
     template: Map<String, JsonValue>,
 }
 
+#[allow(dead_code)]
 struct SuppressingPendingState {
     entry_bytes: usize,
     entries: Option<Vec<Map<String, JsonValue>>>,
@@ -178,6 +183,7 @@ fn event_content_index(event: &Map<String, JsonValue>) -> usize {
     }
 }
 
+#[allow(dead_code)]
 fn is_text_stream_event(event: &Map<String, JsonValue>) -> bool {
     matches!(
         event.get("type").and_then(|v| v.as_str()),
@@ -697,6 +703,7 @@ fn pending_event_bytes(record: &Map<String, JsonValue>) -> usize {
     (delta + content).min(MAX_PAYLOAD_BYTES + 1)
 }
 
+#[allow(dead_code)]
 fn pending_queue_over_cap(pending: &PendingState) -> bool {
     match pending {
         PendingState::Candidate(p) => {
@@ -805,6 +812,7 @@ fn replay_false_positive_candidate(pending: &CandidatePendingState) -> Vec<Map<S
     }
 }
 
+#[allow(dead_code)]
 fn project_event_index(
     event: &Map<String, JsonValue>,
     projection: &PlainTextToolCallMessageProjection,
@@ -850,6 +858,7 @@ fn projected_text_for_event(
     }
 }
 
+#[allow(dead_code)]
 enum PendingClassification {
     Complete,
     FalsePositive,
@@ -1172,10 +1181,10 @@ pub fn normalize_plain_text_tool_call_stream_events(
     async_stream::stream! {
         let mut pending: Option<PendingState> = None;
         let mut over_cap_sequence_open = false;
-        let mut scrub_future_partials = false;
-        let mut force_scrub_terminal = false;
-        let mut saw_stream_start = false;
-        let mut preserve_terminal_content_indexes = false;
+        let mut _scrub_future_partials = false;
+        let _force_scrub_terminal = false;
+        let mut _saw_stream_start = false;
+        let mut _preserve_terminal_content_indexes = false;
         let mut held_text_starts: HashMap<String, Map<String, JsonValue>> = HashMap::new();
         let mut line_starts: HashMap<String, bool> = HashMap::new();
         let mut emitted_text_units: HashMap<String, usize> = HashMap::new();
@@ -1201,7 +1210,7 @@ pub fn normalize_plain_text_tool_call_stream_events(
                 .unwrap_or("")
                 .to_string();
             if event_type == "start" {
-                saw_stream_start = true;
+                _saw_stream_start = true;
             }
 
             if event_type == "text_start" || event_type == "text_delta" || event_type == "text_end" {
@@ -1228,11 +1237,11 @@ pub fn normalize_plain_text_tool_call_stream_events(
                     }
                     continue;
                 }
-                let mut incoming = text_value.unwrap();
+                let incoming = text_value.unwrap();
                 let incoming_record = record.clone();
                 let closes_text = event_type == "text_end";
-                let mut authoritative = closes_text;
-                let mut sequence_over_cap = false;
+                let authoritative = closes_text;
+                let sequence_over_cap = false;
 
                 if pending.is_none() {
                     let at_line_start = authoritative
@@ -1248,7 +1257,7 @@ pub fn normalize_plain_text_tool_call_stream_events(
                         yield JsonValue::Object(incoming_record.clone());
                         if !incoming.is_empty() {
                             let content_index = event_content_index(&incoming_record);
-                            preserve_terminal_content_indexes |=
+                            _preserve_terminal_content_indexes |=
                                 (sequence_over_cap || over_cap_sequence_open) && content_index > 0;
                         }
                         over_cap_sequence_open = false;
@@ -1328,7 +1337,7 @@ pub fn normalize_plain_text_tool_call_stream_events(
                                 // keep waiting
                             }
                             PendingClassification::Trim { .. } => {
-                                scrub_future_partials = true;
+                                _scrub_future_partials = true;
                                 pending = None;
                             }
                             PendingClassification::Suppress { .. } => {
@@ -1347,7 +1356,7 @@ pub fn normalize_plain_text_tool_call_stream_events(
                                 }
                             }
                             PendingClassification::Stripped { .. } => {
-                                scrub_future_partials = true;
+                                _scrub_future_partials = true;
                                 pending = None;
                             }
                         }

@@ -149,6 +149,7 @@ pub fn render_markdown_with_markers(ir: &MarkdownIR, options: &RenderOptions) ->
     let points = boundaries;
 
     #[derive(Debug)]
+    #[allow(dead_code)]
     enum OpeningItem {
         Link { end: usize, open: String, close: String, index: usize },
         Style { end: usize, open: String, close: String, style: MarkdownStyle, index: usize },

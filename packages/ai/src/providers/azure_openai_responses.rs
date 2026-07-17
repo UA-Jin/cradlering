@@ -9,11 +9,6 @@ use llm_core::types::{
     StreamOptions,
 };
 
-use crate::providers::azure_deployment_map::resolve_azure_deployment_name_from_map;
-use crate::providers::azure_openai_responses_client_compat::{
-    is_openai_compatible_azure_responses_base_url, is_traditional_azure_openai_host,
-};
-
 /// Streams an Azure OpenAI Responses request.
 pub fn stream_azure_openai_responses(
     _model: Model,

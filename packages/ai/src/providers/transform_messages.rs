@@ -7,9 +7,10 @@
 
 use std::collections::HashMap;
 
-use llm_core::types::{Api, AssistantMessage, ImageContent, Message, Model, TextContent, ToolResultMessage};
+use llm_core::types::{AssistantMessage, ImageContent, Message, Model, TextContent, ToolResultMessage};
 
 const NON_VISION_USER_IMAGE_PLACEHOLDER: &str = "(image omitted: model does not support images)";
+#[allow(dead_code)]
 const NON_VISION_TOOL_IMAGE_PLACEHOLDER: &str = "(tool image omitted: model does not support images)";
 
 fn replace_images_with_placeholder(
@@ -39,6 +40,7 @@ fn replace_images_with_placeholder(
     result
 }
 
+#[allow(dead_code)]
 enum TextOrImage<'a> {
     Text(&'a TextContent),
     Image(&'a ImageContent),

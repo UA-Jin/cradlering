@@ -19,7 +19,7 @@ use crate::api::{
     TtsDirectiveParseResult, TtsModelOverrideConfig, TtsProvider,
 };
 use crate::runtime_api::{
-    get_runtime_config_snapshot, get_runtime_config_source_snapshot, is_verbose, log_verbose,
+    get_runtime_config_snapshot, get_runtime_config_source_snapshot,
     mark_reply_payload_as_tts_supplement, resolve_sendable_outbound_reply_parts,
     select_applicable_runtime_config, ReplyPayload,
 };
@@ -37,6 +37,7 @@ const DEFAULT_TTS_MAX_LENGTH: usize = 1500;
 const DEFAULT_TTS_SUMMARIZE: bool = true;
 const DEFAULT_MAX_TEXT_LENGTH: usize = 4096;
 
+#[allow(dead_code)]
 fn resolve_positive_timeout_ms(timeout_ms: Option<u64>) -> Option<u64> {
     if let Some(t) = timeout_ms {
         if t > 0 {
@@ -46,11 +47,13 @@ fn resolve_positive_timeout_ms(timeout_ms: Option<u64>) -> Option<u64> {
     None
 }
 
+#[allow(dead_code)]
 fn clamp_timer_timeout_ms(t: u64) -> u64 {
     // Mirror the JS clamp helper.
     t.min(2_147_483_647)
 }
 
+#[allow(dead_code)]
 fn resolve_speech_provider_timeout_ms(params: ResolveSpeechProviderTimeoutMsParams) -> u64 {
     if let Some(t) = params.timeout_ms {
         if let Some(v) = resolve_positive_timeout_ms(Some(t)) {
@@ -65,6 +68,7 @@ fn resolve_speech_provider_timeout_ms(params: ResolveSpeechProviderTimeoutMsPara
     resolve_positive_timeout_ms(params.provider_default_timeout_ms).unwrap_or(params.config.timeout_ms)
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 struct ResolveSpeechProviderTimeoutMsParams {
     pub timeout_ms: Option<u64>,
@@ -242,7 +246,7 @@ pub struct TtsTelephonyResult {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct TtsStatusEntry {
+pub struct TtsStatusEntry {
     pub timestamp: u64,
     pub success: bool,
     pub text_length: usize,
@@ -396,6 +400,7 @@ fn normalize_optional_lowercase_string(value: Option<&str>) -> Option<String> {
     value.map(|s| s.to_lowercase())
 }
 
+#[allow(dead_code)]
 fn normalize_lowercase_string_or_empty(value: &str) -> String {
     value.to_lowercase()
 }
@@ -449,6 +454,7 @@ fn collect_tts_personas(raw: &TtsConfig) -> HashMap<String, ResolvedTtsPersona> 
     personas
 }
 
+#[allow(dead_code)]
 fn resolve_persona_provider_config(
     persona: Option<&ResolvedTtsPersona>,
     provider_id: &str,
@@ -466,12 +472,14 @@ fn resolve_persona_provider_config(
     None
 }
 
+#[allow(dead_code)]
 struct MergeProviderConfigResult {
     provider_config: SpeechProviderConfig,
     persona_provider_config: Option<SpeechProviderConfig>,
     persona_binding: String,
 }
 
+#[allow(dead_code)]
 fn merge_provider_config_with_persona(
     provider_config: SpeechProviderConfig,
     persona: Option<&ResolvedTtsPersona>,
@@ -505,6 +513,7 @@ fn merge_provider_config_with_persona(
     }
 }
 
+#[allow(dead_code)]
 fn resolve_raw_provider_config(raw: Option<&TtsConfig>, provider_id: &str) -> SpeechProviderConfig {
     let raw = match raw {
         Some(r) => r,
@@ -592,6 +601,7 @@ fn apply_voice_model_to_speech_provider_config(
     provider_config
 }
 
+#[allow(dead_code)]
 fn sort_speech_providers_for_auto_selection(_cfg: Option<&OpenClawConfig>) -> Vec<JsonValue> {
     list_speech_providers(None)
 }
@@ -924,6 +934,7 @@ fn resolve_tts_synthesis_target(_channel: Option<&str>) -> &'static str {
     "audio-file"
 }
 
+#[allow(dead_code)]
 fn supports_audio_file_voice_memo_output(
     _file_extension: Option<&str>,
     _output_format: Option<&str>,
@@ -973,6 +984,7 @@ fn sanitize_tts_error_for_log(err: &str) -> String {
     err.replace('\r', "\\r").replace('\n', "\\n").replace('\t', "\\t")
 }
 
+#[allow(dead_code)]
 struct BuildTtsFailureResult {
     success: bool,
     error: String,
@@ -981,6 +993,7 @@ struct BuildTtsFailureResult {
     persona: Option<String>,
 }
 
+#[allow(dead_code)]
 fn build_tts_failure_result(
     errors: Vec<String>,
     attempted_providers: Vec<String>,
@@ -999,6 +1012,7 @@ fn build_tts_failure_result(
     }
 }
 
+#[allow(dead_code)]
 enum TtsProviderReadyResolution {
     Ready {
         provider: JsonValue,
@@ -1014,6 +1028,7 @@ enum TtsProviderReadyResolution {
     },
 }
 
+#[allow(dead_code)]
 fn resolve_ready_speech_provider(
     _provider: TtsProvider,
     _cfg: &OpenClawConfig,
@@ -1037,10 +1052,12 @@ fn resolve_tts_request_setup(_params: JsonValue) -> Result<JsonValue, String> {
     Err("TTS request setup unavailable in 1:1 port stubs".to_string())
 }
 
+#[allow(dead_code)]
 fn read_tts_result_string(value: Option<&JsonValue>) -> Option<String> {
     value.and_then(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
+#[allow(dead_code)]
 fn resolve_tts_result_model(
     provider_config: &SpeechProviderConfig,
     provider_overrides: Option<&SpeechProviderOverrides>,
@@ -1053,6 +1070,7 @@ fn resolve_tts_result_model(
         .or_else(|| read_tts_result_string(p.get("model"))))
 }
 
+#[allow(dead_code)]
 fn resolve_tts_result_voice(
     provider_config: &SpeechProviderConfig,
     provider_overrides: Option<&SpeechProviderOverrides>,
@@ -1071,11 +1089,13 @@ fn resolve_tts_result_voice(
         .or_else(|| read_tts_result_string(p.get("voice")))
 }
 
+#[allow(dead_code)]
 struct TempWorkspace {
     dir: PathBuf,
 }
 
 impl TempWorkspace {
+    #[allow(dead_code)]
     fn write(&self, name: &str, content: Vec<u8>) -> String {
         let path = self.dir.join(name);
         let _ = std::fs::create_dir_all(&self.dir);
@@ -1084,6 +1104,7 @@ impl TempWorkspace {
     }
 }
 
+#[allow(dead_code)]
 fn temp_workspace_sync(root_dir: &Path, prefix: &str) -> TempWorkspace {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1094,6 +1115,7 @@ fn temp_workspace_sync(root_dir: &Path, prefix: &str) -> TempWorkspace {
     TempWorkspace { dir }
 }
 
+#[allow(dead_code)]
 fn resolve_preferred_openclaw_tmp_dir() -> PathBuf {
     if let Some(tmp) = std::env::var_os("TMPDIR") {
         return PathBuf::from(tmp);

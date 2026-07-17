@@ -191,6 +191,7 @@ pub struct GatewayClient {
 }
 
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 struct GatewayClientState {
     closed: bool,
     backoff_ms: i64,
@@ -214,9 +215,11 @@ struct GatewayClientState {
 }
 
 const DEFAULT_GATEWAY_CLIENT_URL: &str = "ws://127.0.0.1:18789";
+#[allow(dead_code)]
 const DEFAULT_CLIENT_VERSION: &str = "0.0.0";
 const FORCE_STOP_TERMINATE_GRACE_MS: u64 = 250;
 const STOP_AND_WAIT_TIMEOUT_MS: i64 = 1_000;
+#[allow(dead_code)]
 const MAX_SUPPRESSED_TRANSIENT_PRE_HELLO_CLEAN_CLOSES: i64 = 1;
 
 impl GatewayClient {

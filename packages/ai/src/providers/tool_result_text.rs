@@ -24,6 +24,7 @@ fn media_only_types() -> HashSet<&'static str> {
     set
 }
 
+#[allow(dead_code)]
 static INLINE_DATA_URI_PATTERN: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"(^|[^A-Za-z0-9_])data:([a-z][a-z0-9.+-]*\/[a-z0-9.+-]+(?:;[a-z0-9.+-]+=[^,;"'\s]+|;base64)*,[^\s"'<>)]+)"#).unwrap()
 });
@@ -37,10 +38,12 @@ const MIME_KEY_CANDIDATES: &[&str] = &[
     "content_type",
 ];
 
+#[allow(dead_code)]
 static TEXTUAL_MIME_PATTERN: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"^(?:text\/|application\/(?:json|ld\+json|x-ndjson|xml|javascript|x-www-form-urlencoded)|[^/]+\/[^+]+\+(?:json|xml)$)").unwrap()
 });
 
+#[allow(dead_code)]
 static OPAQUE_OR_BINARY_FIELD_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^(?:blob|buffer|bytes|encrypted_content|encrypted_stdout)$").unwrap());
 
@@ -61,6 +64,7 @@ fn read_mime_type(value: &Value) -> Option<String> {
     None
 }
 
+#[allow(dead_code)]
 fn is_binary_mime_type(mime_type: &str) -> bool {
     let normalized = mime_type.split(';').next().unwrap_or("").trim().to_lowercase();
     if normalized.is_empty() {
@@ -69,6 +73,7 @@ fn is_binary_mime_type(mime_type: &str) -> bool {
     !TEXTUAL_MIME_PATTERN.is_match(&normalized)
 }
 
+#[allow(dead_code)]
 fn describe_omitted_value(value: &Value, label: &str) -> String {
     let length = match value {
         Value::String(s) => Some(s.len()),
@@ -81,6 +86,7 @@ fn describe_omitted_value(value: &Value, label: &str) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn redact_inline_data_uris(value: &str) -> String {
     INLINE_DATA_URI_PATTERN
         .replace_all(value, |caps: &regex::Captures<'_>| {
@@ -91,6 +97,7 @@ fn redact_inline_data_uris(value: &str) -> String {
         .into_owned()
 }
 
+#[allow(dead_code)]
 fn redact_structured_text_value(value: &str) -> String {
     let host = get_ai_transport_host();
     let redacted = host.redact_tool_payload_text(value);

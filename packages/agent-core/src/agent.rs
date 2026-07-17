@@ -13,10 +13,10 @@ use llm_core::types::{ImageContent, Message, Model, TextContent, ThinkingBudgets
 use crate::agent_loop::{run_agent_loop, run_agent_loop_continue};
 use crate::errors::TranscriptNotContinuableError;
 use crate::reasoning::resolve_agent_reasoning_option;
-use crate::runtime_deps::{resolve_agent_core_stream_fn, AgentCoreStreamRuntimeDeps, StreamSimpleOnly};
+use crate::runtime_deps::StreamSimpleOnly;
 use crate::types::{
     AbortSignalShim, AfterToolCallContext, AfterToolCallResult, AgentContext, AgentEvent,
-    AgentLoopConfig, AgentLoopTurnUpdate, AgentMessage, AgentState, AgentTool,
+    AgentLoopConfig, AgentLoopTurnUpdate, AgentMessage, AgentTool,
     BeforeToolCallContext, BeforeToolCallResult, QueueMode, StreamFn, TextOrImageContent,
     ThinkingLevel, ToolExecutionMode,
 };
@@ -64,6 +64,7 @@ fn default_model() -> Model {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct MutableAgentState {
     pub system_prompt: String,
@@ -77,6 +78,7 @@ struct MutableAgentState {
     pub error_message: Option<String>,
 }
 
+#[allow(dead_code)]
 impl MutableAgentState {
     fn get_tools(&self) -> Vec<AgentTool> {
         self.tools.clone()
@@ -180,6 +182,7 @@ impl PendingMessageQueue {
 }
 
 /// Stateful wrapper around the low-level agent loop.
+#[allow(dead_code)]
 pub struct Agent {
     state: Mutex<MutableAgentState>,
     listeners: Mutex<Vec<Box<dyn Fn(AgentEvent, AbortSignalShim) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>>>,
