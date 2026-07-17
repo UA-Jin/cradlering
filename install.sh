@@ -246,6 +246,10 @@ build_webui() {
     (
         cd "$webui_dir"
         ui_info "使用 $pkg_mgr 安装依赖..."
+        # pnpm 11 需要 approve-builds 才能运行构建脚本（vue-demi 等）
+        if [[ "$pkg_mgr" == "pnpm" ]]; then
+            pnpm approve-builds vue-demi 2>&1 | tail -1 || true
+        fi
         $pkg_mgr install --no-frozen-lockfile 2>&1 | tail -3
         ui_info "构建生产包..."
         if [[ "$pkg_mgr" == "pnpm" ]]; then
