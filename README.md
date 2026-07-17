@@ -44,6 +44,56 @@ cradle-ring gateway start
 
 **默认登录**：安装完成后，系统会自动生成随机用户名和密码（如 `admin_1822677b` / `bmf0WhXIc1FrGRzm`），仅显示一次，请妥善保管。
 
+### 一键更新
+
+重新运行安装脚本即可更新到最新版本（会保留你的配置和数据）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/UA-Jin/CradleRing/main/install.sh | bash
+```
+
+如果 CDN 缓存导致脚本没更新，用 git clone 方式强制拉最新：
+
+```bash
+git clone https://github.com/UA-Jin/CradleRing.git /tmp/cr && cd /tmp/cr && bash install.sh
+```
+
+更新后需要重启网关生效：
+
+```bash
+cradle-ring gateway start   # 或重启 systemd 服务
+```
+
+> **说明**：更新只覆盖二进制和 UI 文件，`~/.cradle-ring/` 下的配置、会话、审批记录、用户数据全部保留。
+
+### 一键卸载
+
+```bash
+# 停止服务
+cradle-ring gateway stop 2>/dev/null
+systemctl --user stop cradle-ring-gateway 2>/dev/null
+launchctl unload ~/Library/LaunchAgents/dev.cradle-ring.gateway.plist 2>/dev/null
+
+# 删除二进制 + UI + 数据（配置和会话全删）
+rm -rf ~/.local/bin/cradle-ring ~/.local/bin/ui-dist ~/.cradle-ring
+
+# 删除 systemd / launchd 服务（可选）
+rm -f ~/.config/systemd/user/cradle-ring-gateway.service
+rm -f ~/Library/LaunchAgents/dev.cradle-ring.gateway.plist
+```
+
+如果只想重装但保留 Rust 工具链（其他项目在用），只删 CradleRing 相关：
+
+```bash
+rm -rf ~/.local/bin/cradle-ring ~/.local/bin/ui-dist ~/.cradle-ring
+```
+
+彻底清理（连 Rust 一起删，慎用）：
+
+```bash
+rm -rf ~/.local/bin/cradle-ring ~/.local/bin/ui-dist ~/.cradle-ring ~/.cargo ~/.rustup
+```
+
 ---
 
 ## ✨ 功能特点
