@@ -14,10 +14,13 @@
 curl -fsSL https://raw.githubusercontent.com/UA-Jin/CradleRing/main/install.sh | bash
 ```
 
-> **说明**：一键安装脚本会自动检测运行模式：
-> - 本地运行（有源码目录）：直接编译当前目录
-> - curl|bash 运行（无源码目录）：自动从 GitHub 下载源码到临时目录，然后编译安装
-> - 无 git 环境：自动 fallback 到 curl 下载 tarball（无需 git）
+> **说明**：一键安装脚本会自动检测并安装所有依赖：
+> - **Rust 工具链**：未安装时自动通过 rustup 安装
+> - **C 编译器（gcc/cc）**：未安装时自动通过系统包管理器安装（apt/yum/dnf/apk/pacman）
+> - **源码下载**：本地无源码时自动从 GitHub 下载（支持 git clone 或 curl tarball）
+> - **前端构建**：自动安装 pnpm 依赖并构建（--ignore-scripts 跳过构建脚本检查）
+>
+> 全程无需手动安装任何依赖，适合全新服务器一键部署。
 
 ### 手动安装
 
