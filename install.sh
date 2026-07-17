@@ -442,14 +442,31 @@ run_onboarding() {
 
     # ===== 1. 模型配置 =====
     ui_step "【1/4】模型配置（LLM Provider）"
-    echo "  1) OpenAI (api.openai.com)"
-    echo "  2) Anthropic Claude"
-    echo "  3) DeepSeek"
-    echo "  4) 通义千问 Qwen"
-    echo "  5) Ollama（本地，无需 API key）"
-    echo "  6) 跳过（稍后手动配置）"
-    read -p "选择模型 [1-6，默认 6]: " provider_choice </dev/tty
-    provider_choice="${provider_choice:-6}"
+    echo "  国际模型:"
+    echo "    1) OpenAI (api.openai.com)"
+    echo "    2) Anthropic Claude"
+    echo "    3) Groq"
+    echo "  国产模型:"
+    echo "    4) DeepSeek 深度求索"
+    echo "    5) 通义千问 Qwen（阿里云）"
+    echo "    6) 智谱 AI（GLM / ChatGLM）"
+    echo "    7) 月之暗面 Kimi"
+    echo "    8) MiniMax"
+    echo "    9) 零一万物 Yi"
+    echo "   10) 阶跃星辰 StepFun"
+    echo "   11) 百川智能 Baichuan"
+    echo "   12) 讯飞星火 Spark"
+    echo "   13) 百度文心 ERNIE（千帆）"
+    echo "   14) 腾讯混元 Hunyuan"
+    echo "   15) 商汤日日新 SenseNova"
+    echo "   16) 天工 Skywork"
+    echo "   17) 硅基流动 SiliconFlow（聚合平台）"
+    echo "   18) 无问芯穹 Infinigence"
+    echo "  其他:"
+    echo "   19) Ollama（本地，无需 API key）"
+    echo "   20) 跳过（稍后手动配置）"
+    read -p "选择模型 [1-20，默认 20]: " provider_choice </dev/tty
+    provider_choice="${provider_choice:-20}"
 
     local provider_name="" provider_key="" provider_url="" provider_model=""
     case "$provider_choice" in
@@ -459,15 +476,57 @@ run_onboarding() {
         2) provider_name="anthropic"; provider_url="https://api.anthropic.com/v1"
            read -p "Anthropic API Key (sk-ant-...): " provider_key </dev/tty
            read -p "模型 [默认 claude-3-5-sonnet]: " provider_model </dev/tty; provider_model="${provider_model:-claude-3-5-sonnet}" ;;
-        3) provider_name="deepseek"; provider_url="https://api.deepseek.com/v1"
+        3) provider_name="groq"; provider_url="https://api.groq.com/openai/v1"
+           read -p "Groq API Key: " provider_key </dev/tty
+           read -p "模型 [默认 llama-3.3-70b]: " provider_model </dev/tty; provider_model="${provider_model:-llama-3.3-70b}" ;;
+        4) provider_name="deepseek"; provider_url="https://api.deepseek.com/v1"
            read -p "DeepSeek API Key: " provider_key </dev/tty
            read -p "模型 [默认 deepseek-chat]: " provider_model </dev/tty; provider_model="${provider_model:-deepseek-chat}" ;;
-        4) provider_name="qwen"; provider_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
+        5) provider_name="qwen"; provider_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
            read -p "Qwen API Key: " provider_key </dev/tty
            read -p "模型 [默认 qwen-plus]: " provider_model </dev/tty; provider_model="${provider_model:-qwen-plus}" ;;
-        5) provider_name="ollama"; provider_url="http://localhost:11434/v1"; provider_key=""
-           read -p "Ollama 模型 [默认 llama3.2]: " provider_model </dev/tty; provider_model="${provider_model:-llama3.2}" ;;
-        6) ui_info "跳过模型配置" ;;
+        6) provider_name="zhipu"; provider_url="https://open.bigmodel.cn/api/paas/v4"
+           read -p "智谱 API Key: " provider_key </dev/tty
+           read -p "模型 [默认 glm-4-plus]: " provider_model </dev/tty; provider_model="${provider_model:-glm-4-plus}" ;;
+        7) provider_name="kimi"; provider_url="https://api.moonshot.cn/v1"
+           read -p "Kimi API Key: " provider_key </dev/tty
+           read -p "模型 [默认 moonshot-v1-8k]: " provider_model </dev/tty; provider_model="${provider_model:-moonshot-v1-8k}" ;;
+        8) provider_name="minimax"; provider_url="https://api.minimax.chat/v1"
+           read -p "MiniMax API Key: " provider_key </dev/tty
+           read -p "模型 [默认 abab6.5s-chat]: " provider_model </dev/tty; provider_model="${provider_model:-abab6.5s-chat}" ;;
+        9) provider_name="yi"; provider_url="https://api.01.ai/v1"
+           read -p "零一万物 API Key: " provider_key </dev/tty
+           read -p "模型 [默认 yi-large]: " provider_model </dev/tty; provider_model="${provider_model:-yi-large}" ;;
+        10) provider_name="stepfun"; provider_url="https://api.stepfun.com/v1"
+            read -p "阶跃星辰 API Key: " provider_key </dev/tty
+            read -p "模型 [默认 step-2-16k]: " provider_model </dev/tty; provider_model="${provider_model:-step-2-16k}" ;;
+        11) provider_name="baichuan"; provider_url="https://api.baichuan-ai.com/v1"
+            read -p "百川 API Key: " provider_key </dev/tty
+            read -p "模型 [默认 Baichuan4]: " provider_model </dev/tty; provider_model="${provider_model:-Baichuan4}" ;;
+        12) provider_name="spark"; provider_url="https://spark-api-open.xf-yun.com/v1"
+            read -p "讯飞星火 API Key: " provider_key </dev/tty
+            read -p "模型 [默认 spark-4.0-ultra]: " provider_model </dev/tty; provider_model="${provider_model:-spark-4.0-ultra}" ;;
+        13) provider_name="ernie"; provider_url="https://qianfan.baidubce.com/v2"
+            read -p "百度千帆 API Key: " provider_key </dev/tty
+            read -p "模型 [默认 ernie-4.0-8k]: " provider_model </dev/tty; provider_model="${provider_model:-ernie-4.0-8k}" ;;
+        14) provider_name="hunyuan"; provider_url="https://api.hunyuan.cloud.tencent.com/v1"
+            read -p "腾讯混元 SecretId: " provider_key </dev/tty
+            read -p "模型 [默认 hunyuan-pro]: " provider_model </dev/tty; provider_model="${provider_model:-hunyuan-pro}" ;;
+        15) provider_name="sensenova"; provider_url="https://api.sensenova.cn/v1"
+            read -p "商汤 API Key: " provider_key </dev/tty
+            read -p "模型 [默认 SenseNova-V6]: " provider_model </dev/tty; provider_model="${provider_model:-SenseNova-V6}" ;;
+        16) provider_name="skywork"; provider_url="https://api.tiangong.cn/v1"
+            read -p "天工 API Key: " provider_key </dev/tty
+            read -p "模型 [默认 skywork-mega]: " provider_model </dev/tty; provider_model="${provider_model:-skywork-mega}" ;;
+        17) provider_name="siliconflow"; provider_url="https://api.siliconflow.cn/v1"
+            read -p "硅基流动 API Key: " provider_key </dev/tty
+            read -p "模型 [默认 deepseek-chat]: " provider_model </dev/tty; provider_model="${provider_model:-deepseek-chat}" ;;
+        18) provider_name="infinigence"; provider_url="https://api.infinigence.ai/v1"
+            read -p "无问芯穹 API Key: " provider_key </dev/tty
+            read -p "模型 [默认 qwen-plus]: " provider_model </dev/tty; provider_model="${provider_model:-qwen-plus}" ;;
+        19) provider_name="ollama"; provider_url="http://localhost:11434/v1"; provider_key=""
+            read -p "Ollama 模型 [默认 llama3.2]: " provider_model </dev/tty; provider_model="${provider_model:-llama3.2}" ;;
+        20) ui_info "跳过模型配置" ;;
     esac
 
     # ===== 2. 技能选择 =====
@@ -547,7 +606,7 @@ run_onboarding() {
         providers_json="{\"$provider_name\": {\"apiKey\": \"$provider_key\", \"baseUrl\": \"$provider_url\", \"model\": \"$provider_model\", \"enabled\": true}}"
     fi
     local primary_model="${provider_model:-gpt-4o-mini}"
-    if [[ "$provider_choice" == "6" ]]; then primary_model="gpt-4o-mini"; fi
+    if [[ "$provider_choice" == "20" ]]; then primary_model="gpt-4o-mini"; fi
 
     cat > "$cfg" <<EOCFG
 {
