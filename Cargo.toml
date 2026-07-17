@@ -21,12 +21,13 @@ members = [
     "packages/agent-core",
     "packages/gateway-client",
     "packages/memory-host-sdk",
+    "packages/memory-engine",
     "packages/ai",
     "crates/cradle-ring",
 ]
 
 [workspace.package]
-version = "0.0.1"
+version = "2026.7.2"
 edition = "2021"
 authors = ["CradleRing"]
 license = "MIT"

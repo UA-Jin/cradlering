@@ -59,4 +59,5 @@ acp-core = { path = "../../packages/acp-core" }
 agent-core = { path = "../../packages/agent-core" }
 gateway-client = { path = "../../packages/gateway-client" }
 memory-host-sdk = { path = "../../packages/memory-host-sdk" }
+memory-engine = { path = "../../packages/memory-engine" }
 ai = { path = "../../packages/ai" }

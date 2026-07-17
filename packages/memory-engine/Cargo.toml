@@ -1,0 +1,18 @@
+[package]
+name = "memory-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+anyhow = "1.0"
+once_cell = "1"
+sha2 = "0.10"
+base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tracing = "0.1"
+async-trait = "0.1"

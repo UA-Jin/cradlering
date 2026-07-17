@@ -3,6 +3,7 @@
 // 一个功能完整的 CradleRing 网关，实现了完整的 WebSocket JSON-RPC 协议。
 // 包含：WebSocket JSON-RPC 协议、SQLite 持久化、LLM 调用、记忆系统、任务调度等。
 #![recursion_limit = "512"]
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -10,6 +11,9 @@ use std::sync::Arc;
 use base64::Engine;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+// 记忆引擎 V3（Cache-First + Qdrant-lite + 时序知识图谱 + 级联路由）
+use memory_engine::{MemoryEngine, MemoryEngineConfig, StoreRequest, RecallRequest};
 
 // ============================================================================
 // 基础工具
@@ -1643,7 +1647,7 @@ impl Storage {
     }
     fn load_reviews(&self, limit: usize) -> Vec<ReviewDecision> {
         if let Ok(data) = std::fs::read_to_string(self.reviews_path()) {
-            let mut all: Vec<ReviewDecision> = data.lines().filter(|l| !l.is_empty())
+            let all: Vec<ReviewDecision> = data.lines().filter(|l| !l.is_empty())
                 .filter_map(|l| serde_json::from_str(l).ok())
                 .collect();
             let start = all.len().saturating_sub(limit);
@@ -1938,6 +1942,9 @@ struct AppState {
     channels: Arc<ChannelManager>,
     /// 当前认证用户（从 WebSocket 握手 token 解析得到，按 ws 连接隔离，这里仅存默认用户）
     current_user: tokio::sync::Mutex<Option<User>>,
+    /// 记忆引擎 V3（Cache-First + 向量检索 + 时序知识图谱 + 级联路由）
+    /// 使用 OnceCell 实现首次访问时懒加载
+    memory_engine: tokio::sync::OnceCell<Arc<MemoryEngine>>,
 }
 
 impl AppState {
@@ -1953,6 +1960,7 @@ impl AppState {
             pending_approval_instances: tokio::sync::Mutex::new(HashMap::new()),
             channels: Arc::new(ChannelManager::new()),
             current_user: tokio::sync::Mutex::new(None),
+            memory_engine: tokio::sync::OnceCell::new(),
         });
         state
     }
@@ -1971,6 +1979,26 @@ impl AppState {
             let s2 = s.clone();
             tokio::spawn(approval_advance_loop(s2));
         });
+    }
+
+    /// 获取或初始化记忆引擎 V3
+    ///
+    /// 配置来源（按优先级）：
+    /// 1. config.raw_json.memory 节（install.sh 写入的格式）
+    /// 2. config.raw_json.memoryEngine 节（高级覆盖）
+    /// 3. 默认值（本地哈希 Embedding + Qdrant-lite 向量库）
+    async fn memory(&self) -> Result<&Arc<MemoryEngine>, String> {
+        self.memory_engine.get_or_try_init(|| async {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+            let raw = &self.config.raw_json;
+            // 兼容两种配置 key：memory / memoryEngine
+            let cfg_json = raw.get("memoryEngine")
+                .or_else(|| raw.get("memory"))
+                .cloned()
+                .unwrap_or(serde_json::json!({}));
+            let cfg = MemoryEngineConfig::from_json(&cfg_json, &home);
+            MemoryEngine::new(cfg).map(Arc::new)
+        }).await.map_err(|e: anyhow::Error| format!("记忆引擎初始化失败: {}", e))
     }
 }
 
@@ -2111,8 +2139,6 @@ async fn handle_http(
     request: &str,
     state: Arc<AppState>,
 ) {
-    use tokio::io::AsyncWriteExt;
-
     let first_line = request.lines().next().unwrap_or("");
     let path = first_line.split_whitespace().nth(1).unwrap_or("/");
     let method = first_line.split_whitespace().next().unwrap_or("GET");
@@ -3633,6 +3659,7 @@ async fn send_ws_close(stream: &mut tokio::net::TcpStream) {
 // ============================================================================
 
 async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Value) -> serde_json::Value {
+    #[allow(unreachable_patterns)]
     match method {
         "health" => json!({"ok": true, "uptimeMs": current_ms() - state.started_at}),
         "status" => {
@@ -4193,40 +4220,152 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
             json!({"ok": true, "approval": approval_to_json(&ap_clone)})
         }
         "memory.list" => {
-            let items = state.storage.load_memory();
-            json!({
-                "memories": items.iter().map(|m| json!({
-                    "id": m.id, "kind": &m.kind, "body": &m.body,
-                    "source": &m.source, "confidence": m.confidence,
-                    "createdAt": m.created_at
-                })).collect::<Vec<_>>(),
-                "count": items.len()
-            })
+            // V3 优先（失败降级到 V2）
+            match state.memory().await {
+                Ok(engine) => {
+                    let records = engine.list_memories(None);
+                    let memories: Vec<_> = records.iter().filter_map(|r| {
+                        let kind = r.metadata.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                        if kind == "l2_cache" { return None; }
+                        Some(json!({
+                            "id": r.id, "kind": kind, "body": r.text,
+                            "source": r.metadata.get("source").and_then(|v| v.as_str()).unwrap_or(""),
+                            "confidence": 1.0,
+                            "tags": r.metadata.get("tags").cloned().unwrap_or(json!([])),
+                            "hitCount": r.metadata.get("hitCount").and_then(|v| v.as_u64()).unwrap_or(0),
+                            "createdAt": r.metadata.get("createdAt").and_then(|v| v.as_i64()).unwrap_or(0),
+                        }))
+                    }).collect();
+                    // 合并 V2（兼容旧数据）
+                    let v2_items = state.storage.load_memory();
+                    let v2_memories: Vec<_> = v2_items.iter().map(|m| json!({
+                        "id": format!("v2-{}", m.id), "kind": &m.kind, "body": &m.body,
+                        "source": &m.source, "confidence": m.confidence,
+                        "createdAt": m.created_at
+                    })).collect();
+                    let mut all = memories;
+                    all.extend(v2_memories);
+                    json!({ "memories": all, "count": all.len() })
+                }
+                Err(_) => {
+                    let items = state.storage.load_memory();
+                    json!({
+                        "memories": items.iter().map(|m| json!({
+                            "id": m.id, "kind": &m.kind, "body": &m.body,
+                            "source": &m.source, "confidence": m.confidence,
+                            "createdAt": m.created_at
+                        })).collect::<Vec<_>>(),
+                        "count": items.len()
+                    })
+                }
+            }
         }
         "memory.search" => {
-            let query = params["query"].as_str().unwrap_or("").to_lowercase();
-            let items = state.storage.load_memory();
-            let matches: Vec<_> = items.iter()
-                .filter(|m| m.body.to_lowercase().contains(&query))
-                .map(|m| json!({
-                    "id": m.id, "kind": &m.kind, "body": &m.body,
-                    "source": &m.source, "confidence": m.confidence, "score": 0.9
-                }))
-                .collect();
-            json!({ "results": matches, "query": params["query"] })
+            // V3 语义检索（带 V2 关键词降级）
+            let query = params["query"].as_str().unwrap_or("").to_string();
+            let top_k = params["topK"].as_u64().unwrap_or(20) as usize;
+            let session_key = params["sessionKey"].as_str().map(String::from);
+
+            if query.trim().is_empty() {
+                return json!({ "results": [], "query": query });
+            }
+
+            match state.memory().await {
+                Ok(engine) => {
+                    let req = RecallRequest {
+                        query: query.clone(),
+                        session_key,
+                        top_k,
+                        use_l1: false,
+                        use_l2: false,
+                        use_l4: true,
+                        use_graph: true,
+                    };
+                    match engine.recall(req).await {
+                        Ok(result) => {
+                            if let Some(top) = result.vector_hits.first() {
+                                let _ = engine.increment_hit(&top.record.id);
+                            }
+                            let results: Vec<_> = result.vector_hits.iter().map(|h| json!({
+                                "id": h.record.id,
+                                "body": h.record.text,
+                                "kind": h.record.metadata.get("kind").and_then(|v| v.as_str()).unwrap_or(""),
+                                "source": h.record.metadata.get("source").and_then(|v| v.as_str()).unwrap_or(""),
+                                "tags": h.record.metadata.get("tags").cloned().unwrap_or(json!([])),
+                                "score": h.score,
+                                "hitCount": h.record.metadata.get("hitCount").and_then(|v| v.as_u64()).unwrap_or(0),
+                                "createdAt": h.record.metadata.get("createdAt").and_then(|v| v.as_i64()).unwrap_or(0),
+                            })).collect();
+                            json!({
+                                "results": results,
+                                "query": query,
+                                "graphEntities": result.graph_entities.iter().map(|e| json!({
+                                    "id": e.id, "name": e.name, "kind": e.kind, "source": e.source,
+                                })).collect::<Vec<_>>(),
+                                "embeddingReal": result.embedding_real,
+                                "latencyMs": result.latency_ms,
+                            })
+                        }
+                        Err(e) => {
+                            let items = state.storage.load_memory();
+                            let q = query.to_lowercase();
+                            let matches: Vec<_> = items.iter()
+                                .filter(|m| m.body.to_lowercase().contains(&q))
+                                .map(|m| json!({
+                                    "id": m.id, "kind": m.kind, "body": m.body,
+                                    "source": m.source, "score": 0.5
+                                }))
+                                .collect();
+                            json!({ "results": matches, "query": query, "fallback": "keyword", "error": e.to_string() })
+                        }
+                    }
+                }
+                Err(_) => {
+                    let items = state.storage.load_memory();
+                    let q = query.to_lowercase();
+                    let matches: Vec<_> = items.iter()
+                        .filter(|m| m.body.to_lowercase().contains(&q))
+                        .map(|m| json!({
+                            "id": m.id, "kind": m.kind, "body": m.body,
+                            "source": m.source, "score": 0.5
+                        }))
+                        .collect();
+                    json!({ "results": matches, "query": query, "fallback": "keyword-v2" })
+                }
+            }
         }
-        "memory.add" => {
-            let body = params["body"].as_str().unwrap_or("");
-            let kind = params["kind"].as_str().unwrap_or("fact");
+        "memory.add" | "memory.save" => {
+            // V3 写入（兼容旧 V2 存储）
+            let body = params["body"].as_str().unwrap_or("").to_string();
+            let kind = params["kind"].as_str().unwrap_or("fact").to_string();
+            let source = params["source"].as_str().unwrap_or("manual").to_string();
+            let tags: Vec<String> = params["tags"].as_array()
+                .map(|arr| arr.iter().filter_map(|t| t.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+
+            // V2 兼容
             let mut items = state.storage.load_memory();
-            let id = items.iter().map(|m| m.id).max().unwrap_or(0) + 1;
+            let v2_id = items.iter().map(|m| m.id).max().unwrap_or(0) + 1;
             items.push(MemoryItem {
-                id, kind: kind.to_string(), body: body.to_string(),
-                source: "manual".to_string(), confidence: 1.0,
+                id: v2_id, kind: kind.clone(), body: body.clone(),
+                source: source.clone(), confidence: 1.0,
                 created_at: current_ms(),
             });
             state.storage.save_memory(&items);
-            json!({ "id": id, "ok": true })
+
+            // V3 写入
+            let v3_id = match state.memory().await {
+                Ok(engine) => {
+                    let req = StoreRequest {
+                        body: body.clone(), kind: kind.clone(), source: source.clone(),
+                        tags: tags.clone(), session_key: None,
+                        original_query: None, model: None,
+                    };
+                    engine.store(req).await.ok()
+                }
+                Err(_) => None,
+            };
+            json!({ "id": v2_id, "v3Id": v3_id, "ok": true })
         }
         "wake" => json!({"ok": true}),
         "last-heartbeat" => json!({"ok": true, "ts": current_ms()}),
@@ -4500,7 +4639,7 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
         "sessions.compaction.restore" => {
             // 恢复到检查点：从备份文件还原完整消息历史
             let id = params["id"].as_str().or(params["checkpointId"].as_str()).unwrap_or("").to_string();
-            let mut cps = state.storage.load_compaction_checkpoints();
+            let cps = state.storage.load_compaction_checkpoints();
             let cp = match cps.iter().find(|c| c.id == id) {
                 Some(c) => c.clone(),
                 None => return json!({"ok": false, "error": {"code": "NOT_FOUND", "message": "检查点不存在"}}),
@@ -5460,6 +5599,303 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
         }
 
         // ====================================================================
+        // Memory Engine V3（Cache-First + 向量检索 + 时序知识图谱 + 级联路由）
+        // 新版 RPC：memory2.* 命名空间（与旧版 memory.* 共存，平滑迁移）
+        // ====================================================================
+        "memory.stats" => {
+            // 兼容前端：聚合 V2 + V3 统计
+            let old_items = state.storage.load_memory();
+            let mut stats_json = json!({
+                "v2_total": old_items.len(),
+            });
+            // 尝试获取 V3 引擎统计（失败则降级）
+            match state.memory().await {
+                Ok(engine) => {
+                    let cs = engine.cache_stats();
+                    let gs = engine.graph_stats();
+                    let by_kind: serde_json::Value = {
+                        let mut counts: HashMap<String, u64> = HashMap::new();
+                        for r in engine.list_memories(Some(10000)) {
+                            let k = r.metadata.get("kind").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+                            *counts.entry(k).or_insert(0) += 1;
+                        }
+                        serde_json::to_value(counts).unwrap_or(json!({}))
+                    };
+                    let total_hits: u64 = engine.list_memories(Some(10000)).iter()
+                        .filter_map(|r| r.metadata.get("hitCount").and_then(|v| v.as_u64()))
+                        .sum();
+                    let total_count = engine.list_memories(Some(10000)).len();
+                    let avg_hits = if total_count > 0 { total_hits as f32 / total_count as f32 } else { 0.0 };
+                    stats_json["total"] = json!(total_count);
+                    stats_json["byKind"] = by_kind;
+                    stats_json["avgHits"] = json!(avg_hits);
+                    stats_json["cache"] = json!({
+                        "l1Total": cs.l1_total,
+                        "l1Hits": cs.l1_hits,
+                        "l2Hits": cs.l2_hits,
+                        "l4Hits": cs.l4_hits,
+                        "misses": cs.misses,
+                        "hitRate": cs.hit_rate,
+                    });
+                    stats_json["graph"] = json!(gs);
+                    stats_json["embedding"] = json!({
+                        "provider": engine.embedding().label(),
+                        "dim": engine.embedding().dim(),
+                        "isReal": engine.embedding().is_real(),
+                    });
+                    stats_json["semanticAvailable"] = json!(true);
+                }
+                Err(e) => {
+                    stats_json["semanticAvailable"] = json!(false);
+                    stats_json["v3_error"] = json!(e);
+                }
+            }
+            json!({ "stats": stats_json, "semanticAvailable": stats_json.get("semanticAvailable").and_then(|v| v.as_bool()).unwrap_or(false) })
+        }
+        // V3 新增 RPC：完整召回（带路由决策）
+        "memory2.recall" => {
+            let query = params["query"].as_str().unwrap_or("").to_string();
+            let session_key = params["sessionKey"].as_str().map(String::from);
+            let top_k = params["topK"].as_u64().unwrap_or(5) as usize;
+            if query.trim().is_empty() {
+                return json!({ "error": "query 不能为空" });
+            }
+            let engine = match state.memory().await {
+                Ok(e) => e,
+                Err(e) => return json!({ "error": e }),
+            };
+            let req = RecallRequest {
+                query: query.clone(),
+                session_key,
+                top_k,
+                use_l1: true,
+                use_l2: true,
+                use_l4: true,
+                use_graph: true,
+            };
+            match engine.recall(req).await {
+                Ok(result) => json!({
+                    "cacheHit": result.cache_hit.map(|c| json!({
+                        "key": c.key, "query": c.query, "answer": c.answer,
+                        "model": c.model, "createdAt": c.created_at,
+                    })),
+                    "semanticHit": result.semantic_hit.map(|c| json!({
+                        "key": c.key, "query": c.query, "answer": c.answer,
+                        "model": c.model,
+                    })),
+                    "vectorHits": result.vector_hits.iter().map(|h| json!({
+                        "id": h.record.id, "body": h.record.text,
+                        "kind": h.record.metadata.get("kind").and_then(|v| v.as_str()).unwrap_or(""),
+                        "score": h.score,
+                    })).collect::<Vec<_>>(),
+                    "graphEntities": result.graph_entities.iter().map(|e| json!({
+                        "id": e.id, "name": e.name, "kind": e.kind,
+                    })).collect::<Vec<_>>(),
+                    "route": {
+                        "tier": format!("{:?}", result.route.tier).to_lowercase(),
+                        "suggestedModel": result.route.suggested_model,
+                        "difficulty": result.route.difficulty,
+                        "reason": result.route.reason,
+                    },
+                    "latencyMs": result.latency_ms,
+                    "embeddingReal": result.embedding_real,
+                }),
+                Err(e) => json!({ "error": e.to_string() }),
+            }
+        }
+        "memory2.cache_answer" => {
+            // LLM 完成回答后调用此 RPC 写入缓存
+            let query = params["query"].as_str().unwrap_or("").to_string();
+            let answer = params["answer"].as_str().unwrap_or("").to_string();
+            let session_key = params["sessionKey"].as_str().map(String::from);
+            let model = params["model"].as_str().unwrap_or("unknown").to_string();
+            if query.trim().is_empty() || answer.trim().is_empty() {
+                return json!({ "ok": false, "error": "query/answer 不能为空" });
+            }
+            let engine = match state.memory().await {
+                Ok(e) => e,
+                Err(e) => return json!({ "ok": false, "error": e }),
+            };
+            match engine.cache_answer(&query, &answer, session_key.as_deref(), &model).await {
+                Ok(_) => json!({ "ok": true }),
+                Err(e) => json!({ "ok": false, "error": e.to_string() }),
+            }
+        }
+        "memory2.feedback" => {
+            let key = params["key"].as_str().unwrap_or("").to_string();
+            let positive = params["positive"].as_bool().unwrap_or(true);
+            let engine = match state.memory().await {
+                Ok(e) => e,
+                Err(e) => return json!({ "ok": false, "error": e }),
+            };
+            let ok = engine.feedback(&key, positive);
+            json!({ "ok": ok })
+        }
+        "memory2.graph.snapshot" => {
+            let engine = match state.memory().await {
+                Ok(e) => e,
+                Err(e) => return json!({ "error": e }),
+            };
+            match engine.graph_snapshot() {
+                Some(snap) => json!({
+                    "entities": snap.entities.iter().map(|e| json!({
+                        "id": e.id, "name": e.name, "kind": e.kind, "source": e.source,
+                        "createdAt": e.created_at, "updatedAt": e.updated_at,
+                        "attributes": e.attributes,
+                    })).collect::<Vec<_>>(),
+                    "relations": snap.relations.iter().map(|r| json!({
+                        "id": r.id, "from": r.from_id, "to": r.to_id, "kind": r.kind,
+                        "strength": r.strength, "validFrom": r.valid_from,
+                        "validUntil": r.valid_until, "source": r.source,
+                    })).collect::<Vec<_>>(),
+                    "stats": engine.graph_stats(),
+                }),
+                None => json!({ "error": "图谱未启用" }),
+            }
+        }
+        "memory2.graph.add_entity" => {
+            let name = params["name"].as_str().unwrap_or("").to_string();
+            let kind = params["kind"].as_str().unwrap_or("concept").to_string();
+            let source = params["source"].as_str().unwrap_or("manual").to_string();
+            let now = chrono::Utc::now().timestamp();
+            if name.is_empty() {
+                return json!({ "ok": false, "error": "name 不能为空" });
+            }
+            let engine = match state.memory().await {
+                Ok(e) => e,
+                Err(e) => return json!({ "ok": false, "error": e }),
+            };
+            match engine.graph() {
+                Some(g) => {
+                    let attrs: HashMap<String, serde_json::Value> = params.get("attributes")
+                        .and_then(|v| v.as_object())
+                        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                        .unwrap_or_default();
+                    match g.upsert_entity(memory_engine::Entity {
+                        id: String::new(), name, kind, attributes: attrs, source,
+                        created_at: now, updated_at: now,
+                    }) {
+                        Ok(id) => json!({ "ok": true, "id": id }),
+                        Err(e) => json!({ "ok": false, "error": e.to_string() }),
+                    }
+                }
+                None => json!({ "ok": false, "error": "图谱未启用" }),
+            }
+        }
+        "memory2.graph.add_relation" => {
+            let from_name = params["fromName"].as_str().unwrap_or("").to_string();
+            let to_name = params["toName"].as_str().unwrap_or("").to_string();
+            let kind = params["kind"].as_str().unwrap_or("related").to_string();
+            let source = params["source"].as_str().unwrap_or("manual").to_string();
+            if from_name.is_empty() || to_name.is_empty() {
+                return json!({ "ok": false, "error": "from/to 不能为空" });
+            }
+            let engine = match state.memory().await {
+                Ok(e) => e,
+                Err(e) => return json!({ "ok": false, "error": e }),
+            };
+            let g = match engine.graph() {
+                Some(g) => g,
+                None => return json!({ "ok": false, "error": "图谱未启用" }),
+            };
+            let now = chrono::Utc::now().timestamp();
+            let from_id = match g.upsert_entity(memory_engine::Entity {
+                id: String::new(), name: from_name.clone(), kind: "unknown".to_string(),
+                attributes: HashMap::new(), source: source.clone(),
+                created_at: now, updated_at: now,
+            }) {
+                Ok(id) => id,
+                Err(e) => return json!({ "ok": false, "error": e.to_string() }),
+            };
+            let to_id = match g.upsert_entity(memory_engine::Entity {
+                id: String::new(), name: to_name.clone(), kind: "unknown".to_string(),
+                attributes: HashMap::new(), source: source.clone(),
+                created_at: now, updated_at: now,
+            }) {
+                Ok(id) => id,
+                Err(e) => return json!({ "ok": false, "error": e.to_string() }),
+            };
+            let cumulative = params["cumulative"].as_bool().unwrap_or(false);
+            let rel = memory_engine::Relation {
+                id: String::new(), from_id, to_id, kind,
+                strength: params["strength"].as_f64().unwrap_or(1.0) as f32,
+                attributes: HashMap::new(),
+                valid_from: now, valid_until: None, source,
+            };
+            let res = if cumulative { g.add_relation_cumulative(rel) } else { g.add_relation(rel) };
+            match res {
+                Ok(id) => json!({ "ok": true, "id": id }),
+                Err(e) => json!({ "ok": false, "error": e.to_string() }),
+            }
+        }
+        "memory2.list" => {
+            // V3 向量库列表（带分页 + 过滤）
+            let limit = params["limit"].as_u64().map(|n| n as usize);
+            let engine = match state.memory().await {
+                Ok(e) => e,
+                Err(e) => return json!({ "memories": [], "error": e }),
+            };
+            let records = engine.list_memories(limit);
+            let memories: Vec<_> = records.iter().filter_map(|r| {
+                // 过滤掉 l2_cache 类型（不展示给用户）
+                let kind = r.metadata.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                if kind == "l2_cache" { return None; }
+                Some(json!({
+                    "id": r.id,
+                    "body": r.text,
+                    "kind": kind,
+                    "source": r.metadata.get("source").and_then(|v| v.as_str()).unwrap_or(""),
+                    "tags": r.metadata.get("tags").cloned().unwrap_or(json!([])),
+                    "hitCount": r.metadata.get("hitCount").and_then(|v| v.as_u64()).unwrap_or(0),
+                    "createdAt": r.metadata.get("createdAt").and_then(|v| v.as_i64()).unwrap_or(0),
+                    "score": r.metadata.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                }))
+            }).collect();
+            json!({ "memories": memories, "count": memories.len() })
+        }
+        "memory2.delete" => {
+            let id = params["id"].as_str().unwrap_or("").to_string();
+            let engine = match state.memory().await {
+                Ok(e) => e,
+                Err(e) => return json!({ "ok": false, "error": e }),
+            };
+            match engine.delete_memory(&id) {
+                Ok(deleted) => json!({ "ok": true, "deleted": deleted }),
+                Err(e) => json!({ "ok": false, "error": e.to_string() }),
+            }
+        }
+        "memory2.config" => {
+            // 查看当前记忆引擎配置（脱敏）
+            let engine = match state.memory().await {
+                Ok(e) => e,
+                Err(e) => return json!({ "error": e }),
+            };
+            let cfg = engine.config();
+            json!({
+                "dataDir": cfg.data_dir,
+                "embedding": {
+                    "provider": engine.embedding().label(),
+                    "dim": engine.embedding().dim(),
+                    "isReal": engine.embedding().is_real(),
+                },
+                "cache": {
+                    "l1TtlSecs": cfg.cache.l1_ttl_secs,
+                    "l2Threshold": cfg.cache.l2_threshold,
+                    "l2TtlSecs": cfg.cache.l2_ttl_secs,
+                    "maxEntries": cfg.cache.max_entries,
+                },
+                "router": {
+                    "primaryModel": cfg.router.primary_model,
+                    "smallModel": cfg.router.small_model,
+                    "easyThreshold": cfg.router.easy_threshold,
+                    "hardThreshold": cfg.router.hard_threshold,
+                },
+                "graphEnabled": cfg.enable_graph,
+                "backends": engine.backend_statuses(),
+            })
+        }
+
+        // ====================================================================
         // 补充：MCP 扩展
         // ====================================================================
         "mcp.start" | "mcp.restart" => {
@@ -5977,7 +6413,7 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
             let channels = state.channels_config();
             let mut channel_connected = 0usize;
             let mut channel_error = 0usize;
-            for (id, cfg) in &channels {
+            for (_id, cfg) in &channels {
                 if cfg["enabled"].as_bool().unwrap_or(false) { channel_connected += 1; }
                 if cfg["error"].as_str().is_some() { channel_error += 1; }
             }
@@ -7170,7 +7606,7 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
         }
         "rules.market.install" => {
             let package_id = params["packageId"].as_str().unwrap_or("");
-            let rule_type = params["ruleType"].as_str().unwrap_or("waf").to_string();
+            let _rule_type = params["ruleType"].as_str().unwrap_or("waf").to_string();
             match package_id {
                 "owasp-crs-3.3" => {
                     // 已内置（default_waf_rules 已包含 OWASP CRS 核心规则）
@@ -8087,7 +8523,7 @@ async fn compact_session(
 
     let split_at = original_count - keep;
     let old_messages = &messages[..split_at];
-    let recent_messages = &messages[split_at..];
+    let _recent_messages = &messages[split_at..];
 
     // 提取关键实体（从旧消息全文）
     let old_text: String = old_messages.iter()
@@ -8111,7 +8547,7 @@ async fn compact_session(
     let _ = std::fs::write(&backup_path, &backup_content);
 
     // 构造新的消息文件：第一条 = 摘要（role=system），其余 = 保留的最近消息
-    let summary_message = Message {
+    let _summary_message = Message {
         role: "system".into(),
         content: format!(
             "[会话历史摘要]\n{}\n\n[关键实体保留]\n{}",
@@ -11890,7 +12326,7 @@ fn extract_title(html: &str) -> String {
 }
 
 /// browse 工具：抓取网页 / 模拟点击 / 截图。
-async fn tool_browse(url: &str, action: &str, selector: &str) -> String {
+async fn tool_browse(url: &str, action: &str, _selector: &str) -> String {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()
@@ -11986,6 +12422,7 @@ async fn tool_subdomain_enum(domain: &str) -> String {
 // ============================================================================
 
 /// WAF 检测：多 payload + 多维度识别 WAF 类型 + 绕过测试
+#[allow(unused_assignments)]
 async fn tool_waf_detect(url: &str) -> String {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
@@ -12551,7 +12988,7 @@ fn default_ids_rules() -> Vec<IdsRule> {
 }
 
 /// 入侵检测：分析 auth.log 检测 SSH 暴力破解
-async fn ids_check_ssh_bruteforce(state: &AppState, threshold: u32, window_secs: u64) -> Vec<IdsEvent> {
+async fn ids_check_ssh_bruteforce(_state: &AppState, threshold: u32, window_secs: u64) -> Vec<IdsEvent> {
     let log_path = "/var/log/auth.log";
     if !std::path::Path::new(log_path).exists() {
         return vec![];
@@ -12601,7 +13038,7 @@ fn extract_ip_from_line(line: &str) -> Option<String> {
 }
 
 /// 解析日志时间戳（支持 "Jul 17 12:34:56" 格式）
-fn parse_log_timestamp(line: &str) -> Option<i64> {
+fn parse_log_timestamp(_line: &str) -> Option<i64> {
     // 简化：用当前时间（实际应解析 syslog 时间戳）
     // TODO: 解析 "Jul 17 12:34:56" 格式
     Some(current_ms())
@@ -12764,7 +13201,7 @@ fn parse_custom_rule(line: &str) -> Option<(String, String, String)> {
 }
 
 /// 导入规则主函数：自动检测格式或按指定格式解析
-fn import_rules(content: &str, format: &str, rule_type: &str) -> Result<(usize, Vec<String>), String> {
+fn import_rules(content: &str, format: &str, _rule_type: &str) -> Result<(usize, Vec<String>), String> {
     let mut count = 0;
     let mut errors = vec![];
     for (i, line) in content.lines().enumerate() {
@@ -13726,7 +14163,7 @@ async fn ai_sop_review(
 }
 
 /// 内置 SOP 规则库：检查操作是否有覆盖的 SOP
-fn check_sop_coverage(action: &str, target: &str) -> (bool, Option<String>) {
+fn check_sop_coverage(_action: &str, target: &str) -> (bool, Option<String>) {
     let lower = target.to_lowercase();
     // 服务重启
     if lower.contains("systemctl restart") || lower.contains("service restart") || lower.contains("docker restart") {
@@ -14568,7 +15005,7 @@ fn resolve_next_node(graph: &WorkflowGraph, node: &WorkflowNode, state: &serde_j
 /// 执行单个工作流节点
 async fn execute_workflow_node(
     state: &AppState,
-    graph: &WorkflowGraph,
+    _graph: &WorkflowGraph,
     node: &WorkflowNode,
     wf_state: &mut serde_json::Value,
     span: &mut TraceSpan,
@@ -14821,7 +15258,7 @@ async fn execute_role_agent(
     parent_span: &mut TraceSpan,
 ) -> Result<String, String> {
     let max_iter = role.map(|r| r.max_iterations).unwrap_or(10);
-    let model_override = role.and_then(|r| r.model.clone());
+    let _model_override = role.and_then(|r| r.model.clone());
     let system_prompt = build_role_system_prompt(role);
     let tools = build_role_tools_schema(role);
     let mut messages: Vec<serde_json::Value> = vec![
