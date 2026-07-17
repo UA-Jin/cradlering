@@ -246,9 +246,12 @@ build_webui() {
     (
         cd "$webui_dir"
         ui_info "使用 $pkg_mgr 安装依赖..."
-        # CI 环境下 pnpm 会忽略构建脚本检查（vue-demi 等）
-        export CI=true
-        $pkg_mgr install --no-frozen-lockfile 2>&1 | tail -3
+        # pnpm 11 构建脚本检查会导致失败，用 --ignore-scripts 跳过
+        if [[ "$pkg_mgr" == "pnpm" ]]; then
+            $pkg_mgr install --no-frozen-lockfile --ignore-scripts 2>&1 | tail -3
+        else
+            $pkg_mgr install --no-frozen-lockfile 2>&1 | tail -3
+        fi
         ui_info "构建生产包..."
         if [[ "$pkg_mgr" == "pnpm" ]]; then
             # pnpm 11 严格依赖检查可能阻止 build，直接调 vite
