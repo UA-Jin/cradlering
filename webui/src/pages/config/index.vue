@@ -275,63 +275,55 @@ const tabs = [
 // models 数组保持纯字符串，能力标签通过此处统一查表，未命中的模型默认当纯文本处理。
 interface ModelCap { vision?: boolean; thinking?: boolean; context?: number }
 const modelCapabilities: Record<string, ModelCap> = {
-  // OpenAI（GPT-4.1 系列 1M；GPT-4o 系列 128K；o 系列 200K 推理）
+  // OpenAI GPT-5.6 系列（最新，2026年7月）
+  'gpt-5.6-sol': { vision: true, thinking: true, context: 1000 },
+  'gpt-5.6-terra': { vision: true, thinking: true, context: 1000 },
+  'gpt-5.6-luna': { vision: true, context: 1000 },
   'gpt-4.1': { vision: true, context: 1000 },
   'gpt-4.1-mini': { vision: true, context: 1000 },
-  'gpt-4.1-nano': { vision: true, context: 1000 },
-  'gpt-4o': { vision: true, context: 128 },
-  'gpt-4o-mini': { vision: true, context: 128 },
   'o3': { vision: true, thinking: true, context: 200 },
-  'o3-mini': { thinking: true, context: 200 },
   'o4-mini': { vision: true, thinking: true, context: 200 },
-  // Anthropic Claude（全系列 200K、视觉、扩展思考）
+  // Anthropic Claude（Fable 5 = Mythos 级最新；Opus 4.7 = Opus 最新）
+  'claude-fable-5': { vision: true, thinking: true, context: 1000 },
+  'claude-mythos-5': { vision: true, thinking: true, context: 1000 },
+  'claude-opus-4-7': { vision: true, thinking: true, context: 200 },
   'claude-opus-4-5': { vision: true, thinking: true, context: 200 },
   'claude-sonnet-4-5': { vision: true, thinking: true, context: 200 },
   'claude-haiku-4-5': { vision: true, thinking: true, context: 200 },
-  'claude-3-5-sonnet-latest': { vision: true, thinking: true, context: 200 },
-  // DeepSeek（V3=chat 1M；R1=reasoner 推理 64K）
+  // DeepSeek
   'deepseek-chat': { context: 1000 },
   'deepseek-reasoner': { thinking: true, context: 64 },
-  // 通义千问 Qwen3
+  // 通义千问 Qwen3.7（百炼最新，多模态+思考+编码）
+  'qwen3.7-plus': { vision: true, thinking: true, context: 1000 },
+  'qwen3.7-max': { vision: true, thinking: true, context: 1000 },
   'qwen3-max': { vision: true, thinking: true, context: 256 },
   'qwen3-plus': { vision: true, thinking: true, context: 256 },
   'qwen3-turbo': { context: 1000 },
   'qwen3-coder-plus': { thinking: true, context: 256 },
-  'qwen-max': { context: 32 },
-  'qwen-plus': { context: 128 },
-  'qwen-turbo': { context: 1000 },
-  'qwen-long': { context: 10000 },
-  'qwen-vl-max': { vision: true, context: 32 },
-  'qwen2.5-72b-instruct': { context: 128 },
-  // 智谱 GLM（4.6=200K，4.5=128K，均原生思考）
+  // 智谱 GLM
   'glm-4.6': { thinking: true, context: 200 },
   'glm-4.5': { thinking: true, context: 128 },
   'glm-4.5-air': { thinking: true, context: 128 },
   'glm-4-plus': { context: 128 },
   'glm-4-flash': { context: 128 },
-  'glm-4v-plus': { vision: true, context: 128 },
-  // Kimi / 月之暗面
+  // Kimi K3（2.8T 参数，1M context，原生多模态）
+  'kimi-k3': { vision: true, thinking: true, context: 1000 },
   'kimi-k2-0905-preview': { context: 128 },
-  'moonshot-v1-8k': { context: 8 },
-  'moonshot-v1-32k': { context: 32 },
   'moonshot-v1-128k': { context: 128 },
-  // 豆包 / 字节火山方舟
-  'doubao-1-5-pro-32k': { context: 32 },
-  'doubao-1-5-pro-256k': { context: 256 },
+  // 豆包
+  'doubao-seed-2-0-pro-260215': { thinking: true, context: 256 },
+  'doubao-seed-1-5-pro': { thinking: true, context: 256 },
   'doubao-1-5-thinking-pro': { thinking: true, context: 32 },
   'doubao-1-5-vision-pro': { vision: true, context: 32 },
-  'doubao-seed-1-5-pro': { thinking: true, context: 256 },
-  'doubao-seed-2-0-pro-260215': { thinking: true, context: 256 },
-  // 百度文心 ERNIE
+  // 百度 ERNIE
   'ernie-4.0-8k': { context: 8 },
   'ernie-4.0-turbo-8k': { context: 8 },
   'ernie-3.5-8k': { context: 8 },
-  'ernie-speed-8k': { context: 8 },
-  // 讯飞星火
-  'generalv3.5': { context: 8 },
-  'generalv3': { context: 8 },
+  // 讯飞
   '4.0Ultra': { context: 8 },
-  // MiniMax
+  'generalv3.5': { context: 8 },
+  // MiniMax M3（428B/23B 激活，1M context，原生多模态）
+  'MiniMax-M3': { vision: true, thinking: true, context: 1000 },
   'MiniMax-Text-01': { context: 1000 },
   'abab6.5s-chat': { context: 245 },
   // 阶跃星辰
@@ -361,12 +353,10 @@ const modelCapabilities: Record<string, ModelCap> = {
   // 硅基流动 SiliconFlow（聚合）
   'deepseek-ai/DeepSeek-V3': { context: 64 },
   'deepseek-ai/DeepSeek-R1': { thinking: true, context: 64 },
-  'Qwen/Qwen2.5-72B-Instruct': { context: 128 },
   'Qwen/Qwen3-32B': { thinking: true, context: 128 },
-  'Qwen/Qwen2.5-7B-Instruct': { context: 128 },
   'zai-org/GLM-4.6': { thinking: true, context: 200 },
-  'Kimi/Kimi-K2': { context: 128 },
-  'Pro/deepseek-ai/DeepSeek-V3': { context: 64 },
+  'Kimi/Kimi-K3': { vision: true, thinking: true, context: 1000 },
+  'minimax/MiniMax-M3': { vision: true, thinking: true, context: 1000 },
   // 无问芯穹
   'llama-3.3-70b-instruct': { context: 128 },
   'qwen2.5-72b-instruct': { context: 128 },
@@ -381,9 +371,11 @@ const modelCapabilities: Record<string, ModelCap> = {
   'mistral': { context: 128 },
   'phi4': { context: 16 },
   // OpenRouter（透传命名，按上游能力近似）
-  'openai/gpt-4o': { vision: true, context: 128 },
-  'anthropic/claude-sonnet-4.5': { vision: true, thinking: true, context: 200 },
-  'google/gemini-2.0-flash-001': { vision: true, context: 1000 },
+  'openai/gpt-5.6-sol': { vision: true, thinking: true, context: 1000 },
+  'anthropic/claude-fable-5': { vision: true, thinking: true, context: 1000 },
+  'google/gemini-2.5-pro': { vision: true, thinking: true, context: 1000 },
+  'minimax/minimax-m3': { vision: true, thinking: true, context: 1000 },
+  'moonshotai/kimi-k3': { vision: true, thinking: true, context: 1000 },
 };
 
 // 思考等级选项（无/低/中/高）
@@ -415,26 +407,26 @@ function contextLabel(model: string): string {
 
 // ---------- 20+ Provider 预设（选完自动填充 baseUrl + 模型） ----------
 const providerPresets = [
-  { id: 'openai', label: 'OpenAI', desc: 'GPT-4.1 / o3 系列', color: 'linear-gradient(135deg, #10a37f, #0d8a6c)', baseUrl: 'https://api.openai.com/v1', models: ['gpt-4.1', 'gpt-4.1-mini', 'gpt-4.1-nano', 'gpt-4o', 'gpt-4o-mini', 'o3', 'o4-mini', 'o3-mini'] },
-  { id: 'anthropic', label: 'Anthropic', desc: 'Claude 4.5 系列', color: 'linear-gradient(135deg, #d97757, #c15f3c)', baseUrl: 'https://api.anthropic.com/v1', models: ['claude-opus-4-5', 'claude-sonnet-4-5', 'claude-haiku-4-5', 'claude-3-5-sonnet-latest'] },
+  { id: 'openai', label: 'OpenAI', desc: 'GPT-5.6 Sol/Terra/Luna', color: 'linear-gradient(135deg, #10a37f, #0d8a6c)', baseUrl: 'https://api.openai.com/v1', models: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-4.1', 'gpt-4.1-mini', 'o3', 'o4-mini'] },
+  { id: 'anthropic', label: 'Anthropic', desc: 'Claude Fable 5 / Opus 4.7', color: 'linear-gradient(135deg, #d97757, #c15f3c)', baseUrl: 'https://api.anthropic.com/v1', models: ['claude-fable-5', 'claude-mythos-5', 'claude-opus-4-7', 'claude-opus-4-5', 'claude-sonnet-4-5', 'claude-haiku-4-5'] },
   { id: 'deepseek', label: 'DeepSeek', desc: 'V3 / R1 国产高性价比', color: 'linear-gradient(135deg, #4d6bfe, #3b54d6)', baseUrl: 'https://api.deepseek.com/v1', models: ['deepseek-chat', 'deepseek-reasoner'] },
-  { id: 'qwen', label: '通义千问', desc: 'Qwen3 阿里云百炼', color: 'linear-gradient(135deg, #615ced, #4a45c4)', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', models: ['qwen3-max', 'qwen3-plus', 'qwen3-turbo', 'qwen3-coder-plus', 'qwen-max', 'qwen-plus', 'qwen-turbo', 'qwen-long', 'qwen-vl-max', 'qwen2.5-72b-instruct'] },
-  { id: 'zhipu', label: '智谱 GLM', desc: 'GLM-4.6 智能体', color: 'linear-gradient(135deg, #3b6cff, #2b54cc)', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', models: ['glm-4.6', 'glm-4.5', 'glm-4.5-air', 'glm-4-plus', 'glm-4-flash', 'glm-4v-plus'] },
-  { id: 'moonshot', label: 'Kimi', desc: 'K2 月之暗面长文本', color: 'linear-gradient(135deg, #1f1f1f, #3a3a3a)', baseUrl: 'https://api.moonshot.cn/v1', models: ['kimi-k2-0905-preview', 'moonshot-v1-128k', 'moonshot-v1-32k', 'moonshot-v1-8k'] },
-  { id: 'doubao', label: '豆包', desc: '1.5/2.0 字节火山方舟', color: 'linear-gradient(135deg, #3370ff, #1f5ce6)', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', models: ['doubao-seed-2-0-pro-260215', 'doubao-seed-1-5-pro', 'doubao-1-5-pro-256k', 'doubao-1-5-pro-32k', 'doubao-1-5-thinking-pro', 'doubao-1-5-vision-pro'] },
-  { id: 'baidu', label: '文心一言', desc: '百度 ERNIE', color: 'linear-gradient(135deg, #2932e1, #1a21b8)', baseUrl: 'https://qianfan.baidubce.com/v2', models: ['ernie-4.0-8k', 'ernie-4.0-turbo-8k', 'ernie-3.5-8k', 'ernie-speed-8k'] },
-  { id: 'spark', label: '讯飞星火', desc: '科大讯飞', color: 'linear-gradient(135deg, #2878ff, #1a5fd6)', baseUrl: 'https://spark-api-open.xf-yun.com/v1', models: ['4.0Ultra', 'generalv3.5', 'generalv3'] },
-  { id: 'minimax', label: 'MiniMax', desc: '海螺 AI', color: 'linear-gradient(135deg, #ff6b35, #e05520)', baseUrl: 'https://api.minimax.chat/v1', models: ['MiniMax-Text-01', 'abab6.5s-chat'] },
-  { id: 'stepfun', label: '阶跃星辰', desc: 'Step 系列', color: 'linear-gradient(135deg, #7046cc, #5a36a8)', baseUrl: 'https://api.stepfun.com/v1', models: ['step-2-16k', 'step-1-32k', 'step-1-8k'] },
+  { id: 'qwen', label: '通义千问', desc: 'Qwen3.7 百炼 Coding Plan', color: 'linear-gradient(135deg, #615ced, #4a45c4)', baseUrl: 'https://coding.dashscope.aliyuncs.com/v1', models: ['qwen3.7-plus', 'qwen3.7-max', 'qwen3-max', 'qwen3-plus', 'qwen3-turbo', 'qwen3-coder-plus'] },
+  { id: 'zhipu', label: '智谱 GLM', desc: 'GLM-4.6 智能体', color: 'linear-gradient(135deg, #3b6cff, #2b54cc)', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', models: ['glm-4.6', 'glm-4.5', 'glm-4.5-air', 'glm-4-plus', 'glm-4-flash'] },
+  { id: 'moonshot', label: 'Kimi', desc: 'K3 2.8T 多模态 1M context', color: 'linear-gradient(135deg, #1f1f1f, #3a3a3a)', baseUrl: 'https://api.moonshot.cn/v1', models: ['kimi-k3', 'kimi-k2-0905-preview', 'moonshot-v1-128k'] },
+  { id: 'doubao', label: '豆包', desc: 'Seed 2.0 字节火山方舟', color: 'linear-gradient(135deg, #3370ff, #1f5ce6)', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', models: ['doubao-seed-2-0-pro-260215', 'doubao-seed-1-5-pro', 'doubao-1-5-thinking-pro', 'doubao-1-5-vision-pro'] },
+  { id: 'baidu', label: '文心一言', desc: '百度 ERNIE', color: 'linear-gradient(135deg, #2932e1, #1a21b8)', baseUrl: 'https://qianfan.baidubce.com/v2', models: ['ernie-4.0-8k', 'ernie-4.0-turbo-8k', 'ernie-3.5-8k'] },
+  { id: 'spark', label: '讯飞星火', desc: '科大讯飞', color: 'linear-gradient(135deg, #2878ff, #1a5fd6)', baseUrl: 'https://spark-api-open.xf-yun.com/v1', models: ['4.0Ultra', 'generalv3.5'] },
+  { id: 'minimax', label: 'MiniMax', desc: 'M3 多模态 1M context', color: 'linear-gradient(135deg, #ff6b35, #e05520)', baseUrl: 'https://api.minimax.chat/v1', models: ['MiniMax-M3', 'MiniMax-Text-01', 'abab6.5s-chat'] },
+  { id: 'stepfun', label: '阶跃星辰', desc: 'Step 系列', color: 'linear-gradient(135deg, #7046cc, #5a36a8)', baseUrl: 'https://api.stepfun.com/v1', models: ['step-2-16k', 'step-1-32k'] },
   { id: 'hunyuan', label: '腾讯混元', desc: 'Hunyuan', color: 'linear-gradient(135deg, #00c8dc, #00a3b8)', baseUrl: 'https://api.hunyuan.cloud.tencent.com/v1', models: ['hunyuan-pro', 'hunyuan-standard', 'hunyuan-lite'] },
   { id: 'sensenova', label: '商汤日日新', desc: 'SenseNova', color: 'linear-gradient(135deg, #00b42a, #009a22)', baseUrl: 'https://api.sensenova.cn/v1', models: ['SenseChat-5', 'SenseChat-Turbo'] },
   { id: 'skywork', label: '天工', desc: 'Skywork', color: 'linear-gradient(135deg, #722ed1, #5a1fb8)', baseUrl: 'https://api.skywork.ai/v1', models: ['skywork-o1-preview'] },
-  { id: 'siliconflow', label: '硅基流动', desc: '聚合 100+ 开源模型', color: 'linear-gradient(135deg, #8c57ff, #7046cc)', baseUrl: 'https://api.siliconflow.cn/v1', models: ['deepseek-ai/DeepSeek-V3', 'deepseek-ai/DeepSeek-R1', 'Qwen/Qwen3-32B', 'Qwen/Qwen2.5-72B-Instruct', 'Qwen/Qwen2.5-7B-Instruct', 'zai-org/GLM-4.6', 'Kimi/Kimi-K2'] },
+  { id: 'siliconflow', label: '硅基流动', desc: '聚合 DeepSeek-V3/GLM-4.6/Kimi-K3', color: 'linear-gradient(135deg, #8c57ff, #7046cc)', baseUrl: 'https://api.siliconflow.cn/v1', models: ['deepseek-ai/DeepSeek-V3', 'deepseek-ai/DeepSeek-R1', 'Qwen/Qwen3-32B', 'zai-org/GLM-4.6', 'Kimi/Kimi-K3', 'minimax/MiniMax-M3'] },
   { id: 'infinigence', label: '无问芯穹', desc: 'Infinigence', color: 'linear-gradient(135deg, #ff7d00, #e06700)', baseUrl: 'https://cloud.infini-ai.com/maas/v1', models: ['llama-3.3-70b-instruct', 'qwen2.5-72b-instruct'] },
-  { id: 'groq', label: 'Groq', desc: 'Llama 超快推理', color: 'linear-gradient(135deg, #f55036, #d63d26)', baseUrl: 'https://api.groq.com/openai/v1', models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'llama-3.1-70b-versatile', 'llama-3.2-90b-vision-preview', 'llama-3.2-11b-vision-preview', 'deepseek-r1-distill-llama-70b', 'qwen-2.5-32b', 'gemma2-9b-it'] },
-  { id: 'openrouter', label: 'OpenRouter', desc: '聚合路由', color: 'linear-gradient(135deg, #6366f1, #4f46e5)', baseUrl: 'https://openrouter.ai/api/v1', models: ['openai/gpt-4o', 'anthropic/claude-sonnet-4.5', 'google/gemini-2.0-flash-001'] },
-  { id: 'gemini', label: 'Gemini', desc: 'Google 2.5 系列', color: 'linear-gradient(135deg, #1c69d4, #1553ab)', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', models: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash'] },
-  { id: 'ollama', label: 'Ollama', desc: '本地运行', color: 'linear-gradient(135deg, #6d6777, #4d4868)', baseUrl: 'http://127.0.0.1:11434/v1', models: ['llama3.3', 'llama3.2', 'qwen2.5', 'qwen2.5-coder', 'qwen3', 'deepseek-r1', 'gemma3', 'mistral', 'phi4'] },
+  { id: 'groq', label: 'Groq', desc: 'Llama 超快推理', color: 'linear-gradient(135deg, #f55036, #d63d26)', baseUrl: 'https://api.groq.com/openai/v1', models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'deepseek-r1-distill-llama-70b', 'qwen-2.5-32b'] },
+  { id: 'openrouter', label: 'OpenRouter', desc: '聚合路由（可调所有模型）', color: 'linear-gradient(135deg, #6366f1, #4f46e5)', baseUrl: 'https://openrouter.ai/api/v1', models: ['openai/gpt-5.6-sol', 'anthropic/claude-fable-5', 'google/gemini-2.5-pro', 'minimax/minimax-m3', 'moonshotai/kimi-k3'] },
+  { id: 'gemini', label: 'Gemini', desc: 'Google 2.5 Pro/Flash 1M', color: 'linear-gradient(135deg, #1c69d4, #1553ab)', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', models: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'] },
+  { id: 'ollama', label: 'Ollama', desc: '本地运行', color: 'linear-gradient(135deg, #6d6777, #4d4868)', baseUrl: 'http://127.0.0.1:11434/v1', models: ['llama3.3', 'qwen2.5', 'qwen3', 'deepseek-r1', 'gemma3', 'mistral'] },
   // 自定义：用户自己填 baseUrl / model / provider type
   { id: 'custom', label: '自定义', desc: '手动填写端点与模型', color: 'linear-gradient(135deg, #8c8c8c, #595959)', baseUrl: '', models: [] as string[], custom: true },
 ];
