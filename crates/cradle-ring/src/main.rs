@@ -15394,20 +15394,32 @@ fn rate_limit_to_json(e: &RateLimitEntry) -> serde_json::Value {
 }
 
 /// WAF 请求检查：对请求 URL + 参数 + headers 做规则匹配
+/// WAF 请求检查：对请求 URL + 参数 + headers 做规则匹配
+/// 同时匹配原文与 URL 解码变体（防 %20/%3C 编码绕过，二次解码防双重编码）
 fn waf_check_request(rules: &[WafRule], url: &str, headers: &str, body: &str) -> Vec<WafMatch> {
     let mut matches = vec![];
-    let check_text = format!("{} {} {}", url, headers, body);
+    // 修复：只匹配 URL 路径+query + POST body，不匹配 headers
+    // （headers 是整个 HTTP 请求文本，Accept/User-Agent 等正常 header 里的分号/括号会误触发规则）
+    // headers 参数仅保留用于未来需要检查特定 header 的场景，当前不拼入匹配文本
+    let _ = headers;
+    let raw = format!("{} {}", url, body);
+    let decoded_once = decode_uri(&raw);
+    let decoded_twice = decode_uri(&decoded_once);
+    let check_variants: [&str; 3] = [&raw, &decoded_once, &decoded_twice];
     for rule in rules.iter().filter(|r| r.enabled) {
         if let Ok(re) = regex::Regex::new(&rule.pattern) {
-            if re.is_match(&check_text) {
-                matches.push(WafMatch {
-                    rule_id: rule.id.clone(),
-                    rule_name: rule.name.clone(),
-                    rule_type: rule.rule_type.clone(),
-                    action: rule.action.clone(),
-                    severity: rule.severity.clone(),
-                    matched_text: check_text.chars().take(200).collect(),
-                });
+            for text in &check_variants {
+                if re.is_match(text) {
+                    matches.push(WafMatch {
+                        rule_id: rule.id.clone(),
+                        rule_name: rule.name.clone(),
+                        rule_type: rule.rule_type.clone(),
+                        action: rule.action.clone(),
+                        severity: rule.severity.clone(),
+                        matched_text: text.chars().take(200).collect(),
+                    });
+                    break;
+                }
             }
         }
     }
@@ -16027,7 +16039,10 @@ async fn security_check_request(
         }
     }
 
-    // 4. WAF 规则检查
+    // 4. WAF 规则检查（本机回环流量跳过，避免浏览器正常请求被误拦截）
+    if is_local {
+        return None;
+    }
     let rules = state.storage.load_waf_rules();
     let matches = waf_check_request(&rules, url, headers, body);
     if !matches.is_empty() {
