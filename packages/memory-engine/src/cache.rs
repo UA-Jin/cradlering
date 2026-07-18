@@ -111,31 +111,27 @@ impl CacheEngine {
     /// L1 精确匹配
     pub fn l1_lookup(&self, query: &str, session_key: Option<&str>, now: i64) -> Option<CacheEntry> {
         let key = Self::query_key(query, session_key);
-        let entries = self.entries.read().unwrap();
-        if let Some(entry) = entries.get(&key) {
-            // 检查 TTL
-            if now - entry.created_at <= self.config.l1_ttl_secs {
-                // 释放读锁再写统计
-                let mut stats = self.stats.write().unwrap();
-                stats.l1_hits += 1;
-                let total = stats.l1_hits + stats.l2_hits + stats.l4_hits + stats.misses;
-                stats.hit_rate = if total > 0 { (stats.l1_hits + stats.l2_hits) as f32 / total as f32 } else { 0.0 };
-                let mut e = entry.clone();
-                e.hit_count += 1;
-                e.last_hit = now;
-                drop(entries);
-                drop(stats);
-                // 更新命中信息
-                if let Ok(mut w) = self.entries.write() {
-                    if let Some(stored) = w.get_mut(&key) {
-                        stored.hit_count = e.hit_count;
-                        stored.last_hit = now;
-                    }
+        // 修复：先快速读锁判断，命中后在写锁内直接 +1（避免 lost-update 竞态），
+        // 且不再持 entries 读锁的同时申请 stats 写锁（统一锁序 entries→stats，消除 ABBA 死锁窗口）
+        let hit_entry = {
+            let mut entries = self.entries.write().unwrap();
+            match entries.get_mut(&key) {
+                Some(entry) if now - entry.created_at <= self.config.l1_ttl_secs => {
+                    entry.hit_count += 1;
+                    entry.last_hit = now;
+                    Some(entry.clone())
                 }
-                return Some(e);
+                _ => None,
             }
+        };
+        if hit_entry.is_some() {
+            // entries 锁已释放，安全申请 stats 锁
+            let mut stats = self.stats.write().unwrap();
+            stats.l1_hits += 1;
+            let total = stats.l1_hits + stats.l2_hits + stats.l4_hits + stats.misses;
+            stats.hit_rate = if total > 0 { (stats.l1_hits + stats.l2_hits) as f32 / total as f32 } else { 0.0 };
         }
-        None
+        hit_entry
     }
 
     /// L2 语义匹配（在向量库中查找相似 query）
@@ -188,6 +184,9 @@ impl CacheEngine {
     pub fn record_l4_hit(&self) {
         let mut stats = self.stats.write().unwrap();
         stats.l4_hits += 1;
+        // 修复：L4 也要重算 hit_rate（分母含 l4_hits，之前不刷新导致路由拿到过期命中率）
+        let total = stats.l1_hits + stats.l2_hits + stats.l4_hits + stats.misses;
+        stats.hit_rate = if total > 0 { (stats.l1_hits + stats.l2_hits) as f32 / total as f32 } else { 0.0 };
     }
 
     /// 存入 L1 缓存（精确）
@@ -275,15 +274,23 @@ impl CacheEngine {
 }
 
 /// 归一化 query（去标点 / 转小写 / 去多余空白）
+/// 归一化 query（去标点 / 转小写 / 去多余空白）
+/// 修复：纯标点/emoji 查询归一化为空串时，回退为原文 trim（否则所有符号类 query 共享同一缓存 key 互相串答案）
 fn normalize_query(q: &str) -> String {
-    q.trim()
+    let normalized = q.trim()
         .to_lowercase()
         .chars()
         .map(|c| if c.is_alphanumeric() || c == ' ' { c } else { ' ' })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" ");
+    if normalized.is_empty() {
+        // 回退：保留原文（小写 trim），保证不同符号 query 有不同的 key
+        q.trim().to_lowercase()
+    } else {
+        normalized
+    }
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

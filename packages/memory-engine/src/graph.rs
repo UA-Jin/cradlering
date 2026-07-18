@@ -224,18 +224,57 @@ impl KnowledgeGraph {
     ///
     /// 简化实现：识别"X 喜欢/使用/依赖 Y" 模式。
     /// 生产环境应接入大模型做 NER + 关系抽取。
+    ///
+    /// 关键修复：
+    /// 1. 否定词检测：动词左侧紧邻 不/没/无/别/未 时跳过（"我不喜欢X" 不再抽取为"喜欢"，
+    ///    避免错误关系把真实的"喜欢"关系置为失效 —— 之前会静默破坏数据）
+    /// 2. "是" 类短动词用词边界检查（"但是/是否/不是" 不再误命中）
+    /// 3. 抽取的关系 strength 降为 0.6（启发式候选，不与人工/权威来源关系同等对待）
     pub fn extract_from_text(&self, text: &str, source: &str, now: i64) -> Vec<(Entity, Entity, Relation)> {
         let mut triples: Vec<(Entity, Entity, Relation)> = Vec::new();
         // 简单规则：动词分割
         let verbs = ["喜欢", "使用", "依赖", "导致", "属于", "创建", "包含", "位于", "是"];
+        // 否定前缀（紧邻动词左侧即视为否定）
+        let negations = ["不", "没", "无", "别", "未", "莫"];
+        // 对单字动词"是"的边界保护词（这些词包含"是"但不是独立动词）
+        let shi_guards = ["但是", "是否", "不是", "就是", "只是", "算是", "还是", "或是", "而是", "总是", "要是", "于是", "倒是", "乃是"];
+
         for v in &verbs {
-            if let Some(idx) = text.find(v) {
-                let before = text[..idx].trim();
+            let mut search_from = 0usize;
+            while let Some(rel_idx) = text[search_from..].find(v) {
+                let idx = search_from + rel_idx;
+                search_from = idx + v.len();
+
+                // 否定检测：动词左侧紧邻的字符是否定词 → 跳过
+                let before_text = &text[..idx];
+                let prev_char = before_text.chars().last();
+                if let Some(pc) = prev_char {
+                    if negations.iter().any(|n| n.chars().next() == Some(pc)) {
+                        continue;
+                    }
+                }
+                // "是" 的边界保护：检查前后是否构成保护词（用字符感知窗口，避免 UTF-8 字节边界 panic）
+                if *v == "是" {
+                    let window_start = text[..idx].chars().last().map(|c| idx - c.len_utf8()).unwrap_or(idx);
+                    let mut window_end = (idx + v.len() + 3).min(text.len());
+                    while window_end < text.len() && !text.is_char_boundary(window_end) {
+                        window_end += 1;
+                    }
+                    let window = &text[window_start..window_end];
+                    if shi_guards.iter().any(|g| window.contains(g)) {
+                        continue;
+                    }
+                }
+
+                let before = before_text.trim();
                 let after = text[idx + v.len()..].trim();
                 // 取分词的第一个名词短语（简化：到逗号/句号为止）
-                let subj = before.split(|c: char| c == '，' || c == '。' || c == ',').last().unwrap_or("").trim();
-                let obj = after.split(|c: char| c == '，' || c == '。' || c == ',').next().unwrap_or("").trim();
-                if !subj.is_empty() && !obj.is_empty() {
+                let subj = before.split(|c: char| c == '，' || c == '。' || c == ',' || c == '；' || c == ';').last().unwrap_or("").trim();
+                let obj = after.split(|c: char| c == '，' || c == '。' || c == ',' || c == '；' || c == ';').next().unwrap_or("").trim();
+                // 过滤过短/过长的候选（"我不" 这类残片、整句话）
+                let subj_ok = (1..=20).contains(&subj.chars().count());
+                let obj_ok = (1..=30).contains(&obj.chars().count());
+                if subj_ok && obj_ok {
                     let subj_e = Entity {
                         id: String::new(),
                         name: subj.to_string(),
@@ -259,7 +298,7 @@ impl KnowledgeGraph {
                         from_id: String::new(), // 由 upsert 填充
                         to_id: String::new(),
                         kind: v.to_string(),
-                        strength: 1.0,
+                        strength: 0.6, // 启发式候选，低于人工/权威来源（1.0）
                         attributes: HashMap::new(),
                         valid_from: now,
                         valid_until: None,
@@ -377,5 +416,20 @@ mod tests {
         let multi = g.multi_hop(&u, 2, later + 100);
         assert!(multi.iter().any(|(e, _)| e.name == "Rust"));
         let _ = r1;
+    }
+
+    #[test]
+    fn test_negation_extraction() {
+        let g = KnowledgeGraph::in_memory();
+        let now = 1000i64;
+        // 否定句不应抽取出"喜欢"关系
+        let triples = g.extract_from_text("我不喜欢Python", "test", now);
+        assert!(triples.iter().all(|(_, _, r)| r.kind != "喜欢"), "否定句不能抽取'喜欢'");
+        // 肯定句正常抽取
+        let triples2 = g.extract_from_text("我喜欢Rust", "test", now);
+        assert!(triples2.iter().any(|(_, _, r)| r.kind == "喜欢"), "肯定句应抽取'喜欢'");
+        // "是" 的保护词不误匹配
+        let triples3 = g.extract_from_text("但是这不是问题", "test", now);
+        assert!(triples3.iter().all(|(_, _, r)| r.kind != "是"), "保护词不能抽取'是'");
     }
 }

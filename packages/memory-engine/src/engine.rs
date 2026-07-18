@@ -41,7 +41,9 @@ fn default_true() -> bool { true }
 impl Default for MemoryEngineConfig {
     fn default() -> Self {
         Self {
-            data_dir: format!("{}/.cradle-ring/data/memory-engine", env!("HOME")),
+            // 修复：env!("HOME") 是编译期展开（构建机的 HOME，分发后指向不存在的目录），
+            // 必须用运行期 std::env::var
+            data_dir: format!("{}/.cradle-ring/data/memory-engine", std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())),
             embedding: EmbeddingConfig::default(),
             cache: CacheConfig::default(),
             router: RouterConfig::default(),
@@ -215,10 +217,13 @@ impl MemoryEngine {
     /// 存储一条记忆
     pub async fn store(&self, req: StoreRequest) -> anyhow::Result<String> {
         let now = chrono::Utc::now().timestamp();
-        let now_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(now * 1_000_000_000);
-        // 用纳秒 + 随机后缀，避免同秒多条同 kind 记录覆盖
-        let rand_suffix = format!("{:04x}", now_ns as u32 & 0xffff);
-        let id = format!("{}-{}-{}", req.kind, now, rand_suffix);
+        // 修复：用进程内单调原子计数 + 时间戳 + 真随机后缀，彻底避免同秒同 kind 碰撞
+        // （之前是纳秒低 16 位，同秒同 kind 碰撞率 1/65536，碰撞即静默覆盖）
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let rand_suffix = format!("{:04x}", rand::random::<u16>());
+        let id = format!("{}-{}-{}-{}", req.kind, now, seq, rand_suffix);
         // 生成向量
         let vector = self.embedding.embed(&req.body).await?;
 
@@ -335,26 +340,30 @@ impl MemoryEngine {
         vector_hits.truncate(req.top_k);
 
         // 图谱查询（找 query 中提到的实体）
+        // 修复：中文无空格分词，改用"反向子串匹配"——遍历图谱实体名，
+        // 凡是出现在 query 中的实体都召回（实体名通常 2-10 字，图谱规模有限，O(实体数×query长) 可接受）
         let mut graph_entities = Vec::new();
         if req.use_graph {
             if let Some(g) = &self.graph {
-                // 简化：取 query 的分词作为候选实体名
-                let candidates = extract_candidate_entities(&req.query);
-                for name in candidates.iter().take(5) {
-                    if let Some(e) = g.get_entity_by_name(name) {
+                let snap = g.snapshot();
+                for e in &snap.entities {
+                    if e.name.chars().count() >= 2 && req.query.contains(&e.name) {
                         if !graph_entities.iter().any(|x: &Entity| x.id == e.id) {
-                            graph_entities.push(e);
+                            graph_entities.push(e.clone());
+                            if graph_entities.len() >= 5 { break; }
                         }
                     }
                 }
             }
         }
 
-        // 统计 L4 命中
-        if !vector_hits.is_empty() {
-            self.cache.record_l4_hit();
-        } else {
-            self.cache.record_miss();
+        // 统计 L4 命中（仅当确实尝试了 L4 检索时）
+        if req.use_l4 {
+            if !vector_hits.is_empty() {
+                self.cache.record_l4_hit();
+            } else {
+                self.cache.record_miss();
+            }
         }
 
         // 路由决策
@@ -367,7 +376,7 @@ impl MemoryEngine {
             semantic_hit: None,
             vector_hits,
             graph_entities,
-            keyword_hits: vec![],
+            keyword_hits,
             route,
             latency_ms: t0.elapsed().as_millis() as u32,
             embedding_real: self.embedding.is_real(),
@@ -482,12 +491,3 @@ impl MemoryEngine {
     }
 }
 
-/// 从 query 中提取候选实体名（简化分词）
-fn extract_candidate_entities(query: &str) -> Vec<String> {
-    // 按非字母数字字符切分，过滤掉太短的
-    query
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|s| s.chars().count() >= 2)
-        .map(String::from)
-        .collect()
-}

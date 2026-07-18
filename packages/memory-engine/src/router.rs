@@ -99,11 +99,13 @@ impl CascadingRouter {
         cache_hit_rate: f32,
     ) -> RouteDecision {
         // 如果未配置 small_model，全部走主模型（保持原行为）
+        // 修复：difficulty 返回实际估算值（不硬编码 1.0，避免污染上层日志/统计）
         if self.config.small_model.is_none() {
+            let difficulty = self.estimate_difficulty(query, has_kb_support, cache_hit_rate);
             return RouteDecision {
                 tier: RouteTier::Large,
                 suggested_model: self.config.primary_model.clone(),
-                difficulty: 1.0,
+                difficulty,
                 reason: "no small_model configured".to_string(),
             };
         }

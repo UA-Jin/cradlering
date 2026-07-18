@@ -53,6 +53,16 @@ fn rand_u128() -> u128 {
     ((h1.finish() as u128) << 64) | (h2.finish() as u128)
 }
 
+/// 密码学安全随机 u128（OsRng）。
+/// 安全关键场景（JWT 密钥、密码盐、初始密码、session token）必须使用此函数，
+/// rand_u128 只以毫秒做种子可预测，仅用于 nonce/id 等非安全场景。
+fn secure_rand_u128() -> u128 {
+    use rand::RngCore;
+    let mut bytes = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    u128::from_le_bytes(bytes)
+}
+
 fn base64_encode_bytes(input: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut result = String::new();
@@ -2183,13 +2193,15 @@ async fn handle_http(
     }
 
     if path == "/api/token" || path == "/api/info" {
+        // 安全修复：不再返回网关 token 本体（之前任何人 GET 即得 token → 未授权接管网关）。
+        // token 只通过登录后的 WS 认证通道使用，HTTP 侧只暴露非敏感的网关元信息。
+        // 前端 fetchGatewayToken 拿到的 token 字段恒为空串，不影响兼容性。
         let body = serde_json::json!({
-            "token": state.config.token,
+            "token": "",
             "version": env!("CARGO_PKG_VERSION"),
             "commit": build_commit(),
             "commitDate": build_date(),
-            "websocket": "ws://127.0.0.1:18800/ws",
-            "home": state.storage.home,
+            "websocket": "/ws",
         }).to_string();
         send_response(stream, 200, "OK", "application/json", body.as_bytes()).await;
         return;
@@ -5656,18 +5668,19 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
                 Ok(engine) => {
                     let cs = engine.cache_stats();
                     let gs = engine.graph_stats();
-                    let by_kind: serde_json::Value = {
-                        let mut counts: HashMap<String, u64> = HashMap::new();
-                        for r in engine.list_memories(Some(10000)) {
-                            let k = r.metadata.get("kind").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
-                            *counts.entry(k).or_insert(0) += 1;
+                    // 修复：只取一次列表复用（之前调用 3 次，每次全量 clone 数百 MB）
+                    let records = engine.list_memories(Some(10000));
+                    let mut counts: HashMap<String, u64> = HashMap::new();
+                    let mut total_hits: u64 = 0;
+                    for r in &records {
+                        let k = r.metadata.get("kind").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+                        *counts.entry(k).or_insert(0) += 1;
+                        if let Some(h) = r.metadata.get("hitCount").and_then(|v| v.as_u64()) {
+                            total_hits += h;
                         }
-                        serde_json::to_value(counts).unwrap_or(json!({}))
-                    };
-                    let total_hits: u64 = engine.list_memories(Some(10000)).iter()
-                        .filter_map(|r| r.metadata.get("hitCount").and_then(|v| v.as_u64()))
-                        .sum();
-                    let total_count = engine.list_memories(Some(10000)).len();
+                    }
+                    let total_count = records.len();
+                    let by_kind: serde_json::Value = serde_json::to_value(counts).unwrap_or(json!({}));
                     let avg_hits = if total_count > 0 { total_hits as f32 / total_count as f32 } else { 0.0 };
                     stats_json["total"] = json!(total_count);
                     stats_json["byKind"] = by_kind;
@@ -7462,9 +7475,13 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
         "ids.unban" => {
             let ip = params["ip"].as_str().unwrap_or("");
             if ip.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 ip"}}); }
-            let result = tokio::process::Command::new("sh")
-                .arg("-c")
-                .arg(format!("iptables -D INPUT -s {} -j DROP", ip))
+            // 安全修复：IP 格式校验（防命令注入：ip 可写 "1.1.1.1; id"）
+            if let Err(e) = validate_ip_str(ip) {
+                return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": e}});
+            }
+            // 参数化调用，不经 shell
+            let result = tokio::process::Command::new("iptables")
+                .args(["-D", "INPUT", "-s", ip, "-j", "DROP"])
                 .output().await;
             match result {
                 Ok(o) if o.status.success() => json!({"ok": true, "message": format!("IP {} 已解封", ip)}),
@@ -7689,15 +7706,15 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
         // ====================================================================
 
         // ---- 文件管理器 ----
+        // 安全：所有 files.* 统一走 files_check_path（canonicalize 真实路径 + 白名单 + 拒绝 ..）
 
         "files.list" => {
             let path = params["path"].as_str().unwrap_or("/");
-            // 安全检查：只允许白名单路径
-            let allowed_prefixes = ["/home", "/var", "/opt", "/srv", "/data", "/tmp", "/etc", "/root"];
-            if !allowed_prefixes.iter().any(|p| path.starts_with(p)) {
-                return json!({"ok": false, "error": {"code": "FORBIDDEN", "message": "路径不在白名单", "allowed": allowed_prefixes}});
-            }
-            match tokio::fs::read_dir(path).await {
+            let safe = match files_check_path(path, false) {
+                Ok(p) => p,
+                Err(e) => return json!({"ok": false, "error": {"code": "FORBIDDEN", "message": e}}),
+            };
+            match tokio::fs::read_dir(&safe).await {
                 Ok(mut entries) => {
                     let mut files = vec![];
                     while let Ok(Some(entry)) = entries.next_entry().await {
@@ -7705,7 +7722,7 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
                         let metadata = entry.metadata().await.ok();
                         files.push(json!({
                             "name": name,
-                            "path": format!("{}/{}", path.trim_end_matches('/'), name),
+                            "path": format!("{}/{}", safe.trim_end_matches('/'), name),
                             "isDir": metadata.as_ref().map(|m| m.is_dir()).unwrap_or(false),
                             "size": metadata.as_ref().map(|m| m.len()).unwrap_or(0),
                             "modified": metadata.and_then(|m| m.modified().ok()).map(|t| t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)).unwrap_or(0),
@@ -7716,7 +7733,7 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
                         let b_dir = b["isDir"].as_bool().unwrap_or(false);
                         b_dir.cmp(&a_dir).then(a["name"].as_str().cmp(&b["name"].as_str()))
                     });
-                    json!({"ok": true, "path": path, "files": files, "count": files.len()})
+                    json!({"ok": true, "path": safe, "files": files, "count": files.len()})
                 }
                 Err(e) => json!({"ok": false, "error": {"message": format!("读取目录失败: {}", e)}}),
             }
@@ -7724,16 +7741,18 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
         "files.read" => {
             let path = params["path"].as_str().unwrap_or("");
             if path.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 path"}}); }
-            let allowed_prefixes = ["/home", "/var", "/opt", "/srv", "/data", "/tmp", "/etc", "/root"];
-            if !allowed_prefixes.iter().any(|p| path.starts_with(p)) {
-                return json!({"ok": false, "error": {"code": "FORBIDDEN", "message": "路径不在白名单"}});
-            }
-            match tokio::fs::read_to_string(path).await {
+            let safe = match files_check_path(path, false) {
+                Ok(p) => p,
+                Err(e) => return json!({"ok": false, "error": {"code": "FORBIDDEN", "message": e}}),
+            };
+            match tokio::fs::read_to_string(&safe).await {
                 Ok(content) => {
+                    // 修复：UTF-8 安全截断（之前直接切字节，中文文件会 panic）
                     let truncated = if content.len() > 100_000 {
-                        format!("{}...(已截断，共 {} 字节)", &content[..100_000], content.len())
+                        let cut: String = content.chars().take(100_000).collect();
+                        format!("{}...(已截断，共 {} 字节)", cut, content.len())
                     } else { content };
-                    json!({"ok": true, "path": path, "content": truncated})
+                    json!({"ok": true, "path": safe, "content": truncated})
                 }
                 Err(e) => json!({"ok": false, "error": {"message": format!("读取失败: {}", e)}}),
             }
@@ -7742,47 +7761,48 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
             let path = params["path"].as_str().unwrap_or("");
             let content = params["content"].as_str().unwrap_or("");
             if path.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 path"}}); }
-            let allowed_prefixes = ["/home", "/var", "/opt", "/srv", "/data", "/tmp", "/etc", "/root"];
-            if !allowed_prefixes.iter().any(|p| path.starts_with(p)) {
-                return json!({"ok": false, "error": {"code": "FORBIDDEN", "message": "路径不在白名单"}});
-            }
+            // 写操作要求更严格（必须能 canonicalize 父目录，且禁止 /etc /root）
+            let safe = match files_check_path(path, true) {
+                Ok(p) => p,
+                Err(e) => return json!({"ok": false, "error": {"code": "FORBIDDEN", "message": e}}),
+            };
             // 备份原文件
-            if std::path::Path::new(path).exists() {
-                let backup = format!("{}.bak.{}", path, current_ms());
-                let _ = tokio::fs::copy(path, &backup).await;
+            if std::path::Path::new(&safe).exists() {
+                let backup = format!("{}.bak.{}", safe, current_ms());
+                let _ = tokio::fs::copy(&safe, &backup).await;
             }
-            match tokio::fs::write(path, content).await {
-                Ok(_) => json!({"ok": true, "path": path, "size": content.len()}),
+            match tokio::fs::write(&safe, content).await {
+                Ok(_) => json!({"ok": true, "path": safe, "size": content.len()}),
                 Err(e) => json!({"ok": false, "error": {"message": format!("写入失败: {}", e)}}),
             }
         }
         "files.delete" => {
             let path = params["path"].as_str().unwrap_or("");
             if path.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 path"}}); }
-            let allowed_prefixes = ["/home", "/var", "/opt", "/srv", "/data", "/tmp", "/etc", "/root"];
-            if !allowed_prefixes.iter().any(|p| path.starts_with(p)) {
-                return json!({"ok": false, "error": {"code": "FORBIDDEN", "message": "路径不在白名单"}});
-            }
+            let safe = match files_check_path(path, true) {
+                Ok(p) => p,
+                Err(e) => return json!({"ok": false, "error": {"code": "FORBIDDEN", "message": e}}),
+            };
             // 备份到回收站
             let trash_dir = format!("{}/.cradle-ring/data/trash", state.storage.home);
             let _ = tokio::fs::create_dir_all(&trash_dir).await;
-            let filename = std::path::Path::new(path).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| "unknown".to_string());
+            let filename = std::path::Path::new(&safe).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| "unknown".to_string());
             let trash_path = format!("{}/{}.{}", trash_dir, filename, current_ms());
-            let _ = tokio::fs::copy(path, &trash_path).await;
-            match tokio::fs::remove_file(path).await {
-                Ok(_) => json!({"ok": true, "path": path, "trash": trash_path}),
+            let _ = tokio::fs::copy(&safe, &trash_path).await;
+            match tokio::fs::remove_file(&safe).await {
+                Ok(_) => json!({"ok": true, "path": safe, "trash": trash_path}),
                 Err(e) => json!({"ok": false, "error": {"message": format!("删除失败: {}", e)}}),
             }
         }
         "files.mkdir" => {
             let path = params["path"].as_str().unwrap_or("");
             if path.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 path"}}); }
-            let allowed_prefixes = ["/home", "/var", "/opt", "/srv", "/data", "/tmp", "/etc", "/root"];
-            if !allowed_prefixes.iter().any(|p| path.starts_with(p)) {
-                return json!({"ok": false, "error": {"code": "FORBIDDEN", "message": "路径不在白名单"}});
-            }
-            match tokio::fs::create_dir_all(path).await {
-                Ok(_) => json!({"ok": true, "path": path}),
+            let safe = match files_check_path(path, true) {
+                Ok(p) => p,
+                Err(e) => return json!({"ok": false, "error": {"code": "FORBIDDEN", "message": e}}),
+            };
+            match tokio::fs::create_dir_all(&safe).await {
+                Ok(_) => json!({"ok": true, "path": safe}),
                 Err(e) => json!({"ok": false, "error": {"message": format!("创建失败: {}", e)}}),
             }
         }
@@ -7790,12 +7810,16 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
             let from = params["from"].as_str().unwrap_or("");
             let to = params["to"].as_str().unwrap_or("");
             if from.is_empty() || to.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 from 或 to"}}); }
-            let allowed_prefixes = ["/home", "/var", "/opt", "/srv", "/data", "/tmp", "/etc", "/root"];
-            if !allowed_prefixes.iter().any(|p| from.starts_with(p)) || !allowed_prefixes.iter().any(|p| to.starts_with(p)) {
-                return json!({"ok": false, "error": {"code": "FORBIDDEN", "message": "路径不在白名单"}});
-            }
-            match tokio::fs::rename(from, to).await {
-                Ok(_) => json!({"ok": true, "from": from, "to": to}),
+            let safe_from = match files_check_path(from, true) {
+                Ok(p) => p,
+                Err(e) => return json!({"ok": false, "error": {"code": "FORBIDDEN", "message": e}}),
+            };
+            let safe_to = match files_check_path(to, true) {
+                Ok(p) => p,
+                Err(e) => return json!({"ok": false, "error": {"code": "FORBIDDEN", "message": e}}),
+            };
+            match tokio::fs::rename(&safe_from, &safe_to).await {
+                Ok(_) => json!({"ok": true, "from": safe_from, "to": safe_to}),
                 Err(e) => json!({"ok": false, "error": {"message": format!("重命名失败: {}", e)}}),
             }
         }
@@ -7868,6 +7892,9 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
         "services.status" => {
             let name = params["name"].as_str().unwrap_or("");
             if name.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 name"}}); }
+            if let Err(e) = validate_safe_name(name) {
+                return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": e}});
+            }
             let output = tokio::process::Command::new("sh").arg("-c").arg(format!("systemctl status {} --no-pager 2>&1 | head -30", name)).output().await
                 .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
             json!({"ok": true, "name": name, "status": output})
@@ -7875,7 +7902,10 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
         "services.start" => {
             let name = params["name"].as_str().unwrap_or("");
             if name.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 name"}}); }
-            let result = tokio::process::Command::new("sh").arg("-c").arg(format!("sudo systemctl start {} 2>&1", name)).output().await;
+            if let Err(e) = validate_safe_name(name) {
+                return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": e}});
+            }
+            let result = tokio::process::Command::new("sudo").args(["systemctl", "start", name]).output().await;
             match result {
                 Ok(o) if o.status.success() => json!({"ok": true, "name": name, "action": "start"}),
                 Ok(o) => json!({"ok": false, "error": {"message": String::from_utf8_lossy(&o.stderr)}}),
@@ -7885,7 +7915,10 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
         "services.stop" => {
             let name = params["name"].as_str().unwrap_or("");
             if name.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 name"}}); }
-            let result = tokio::process::Command::new("sh").arg("-c").arg(format!("sudo systemctl stop {} 2>&1", name)).output().await;
+            if let Err(e) = validate_safe_name(name) {
+                return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": e}});
+            }
+            let result = tokio::process::Command::new("sudo").args(["systemctl", "stop", name]).output().await;
             match result {
                 Ok(o) if o.status.success() => json!({"ok": true, "name": name, "action": "stop"}),
                 Ok(o) => json!({"ok": false, "error": {"message": String::from_utf8_lossy(&o.stderr)}}),
@@ -7895,7 +7928,10 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
         "services.restart" => {
             let name = params["name"].as_str().unwrap_or("");
             if name.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 name"}}); }
-            let result = tokio::process::Command::new("sh").arg("-c").arg(format!("sudo systemctl restart {} 2>&1", name)).output().await;
+            if let Err(e) = validate_safe_name(name) {
+                return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": e}});
+            }
+            let result = tokio::process::Command::new("sudo").args(["systemctl", "restart", name]).output().await;
             match result {
                 Ok(o) if o.status.success() => json!({"ok": true, "name": name, "action": "restart"}),
                 Ok(o) => json!({"ok": false, "error": {"message": String::from_utf8_lossy(&o.stderr)}}),
@@ -7906,8 +7942,13 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
             let name = params["name"].as_str().unwrap_or("");
             let lines = params["lines"].as_u64().unwrap_or(100) as usize;
             if name.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 name"}}); }
-            let output = tokio::process::Command::new("sh").arg("-c").arg(format!("journalctl -u {} -n {} --no-pager 2>&1", name, lines)).output().await
-                .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+            if let Err(e) = validate_safe_name(name) {
+                return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": e}});
+            }
+            let lines = lines.min(5000);
+            let output = tokio::process::Command::new("journalctl")
+                .args(["-u", name, "-n", &lines.to_string(), "--no-pager"]).output().await
+                .map(|o| format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))).unwrap_or_default();
             json!({"ok": true, "name": name, "logs": output})
         }
 
@@ -7923,6 +7964,14 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
         "firewall.add" => {
             let rule = params["rule"].as_str().unwrap_or("");
             if rule.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 rule"}}); }
+            // 安全修复：规则字符白名单（防命令注入：rule 之前完全任意 = 直接给 shell）
+            // 防火墙规则只需要：字母数字 空格 . / : - ,（端口范围、CIDR、协议名、动作）
+            if !rule.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '/' | ':' | '-' | ',' | '_')) {
+                return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "规则包含非法字符（仅允许 字母数字 空格 . / : - , _）"}});
+            }
+            if rule.len() > 200 {
+                return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "规则过长"}});
+            }
             // 优先用 ufw（如果可用），否则用 iptables
             let has_ufw = tokio::process::Command::new("sh").arg("-c").arg("command -v ufw >/dev/null 2>&1 && echo yes || echo no").output().await
                 .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default() == "yes";
@@ -7968,16 +8017,30 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
         "ssl.renew" => {
             let domain = params["domain"].as_str().unwrap_or("");
             if domain.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 domain"}}); }
-            let output = tokio::process::Command::new("sh").arg("-c").arg(format!("sudo certbot renew --cert-name {} --no-pager 2>&1", domain)).output().await
-                .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+            // 安全修复：域名格式校验（防命令注入）
+            if let Err(e) = validate_domain_str(domain) {
+                return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": e}});
+            }
+            // 参数化调用（不经 shell）
+            let output = tokio::process::Command::new("sudo")
+                .args(["certbot", "renew", "--cert-name", domain, "--no-pager"]).output().await
+                .map(|o| format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))).unwrap_or_default();
             json!({"ok": true, "domain": domain, "output": output})
         }
         "ssl.obtain" => {
             let domain = params["domain"].as_str().unwrap_or("");
             let email = params["email"].as_str().unwrap_or("");
             if domain.is_empty() || email.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 domain 或 email"}}); }
-            let output = tokio::process::Command::new("sh").arg("-c").arg(format!("sudo certbot certonly --standalone -d {} --email {} --agree-tos --no-pager 2>&1", domain, email)).output().await
-                .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+            // 安全修复：域名 + 邮箱格式校验
+            if let Err(e) = validate_domain_str(domain) {
+                return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": e}});
+            }
+            if !email.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '@' | '.' | '_' | '-' | '+')) || !email.contains('@') {
+                return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "非法邮箱格式"}});
+            }
+            let output = tokio::process::Command::new("sudo")
+                .args(["certbot", "certonly", "--standalone", "-d", domain, "--email", email, "--agree-tos", "--no-pager"]).output().await
+                .map(|o| format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))).unwrap_or_default();
             json!({"ok": true, "domain": domain, "output": output})
         }
 
@@ -7997,14 +8060,24 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
             let container = params["container"].as_str().unwrap_or("");
             let lines = params["lines"].as_u64().unwrap_or(100) as usize;
             if container.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 container"}}); }
-            let output = tokio::process::Command::new("sh").arg("-c").arg(format!("docker logs --tail {} {} 2>&1", lines, container)).output().await
-                .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+            // 安全修复：容器名校验（防命令注入）
+            if let Err(e) = validate_safe_name(container) {
+                return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": e}});
+            }
+            let lines = lines.min(5000);
+            let output = tokio::process::Command::new("docker")
+                .args(["logs", "--tail", &lines.to_string(), container]).output().await
+                .map(|o| format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))).unwrap_or_default();
             json!({"ok": true, "container": container, "logs": output})
         }
         "docker.restart" => {
             let container = params["container"].as_str().unwrap_or("");
             if container.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 container"}}); }
-            let result = tokio::process::Command::new("sh").arg("-c").arg(format!("docker restart {} 2>&1", container)).output().await;
+            // 安全修复：容器名校验
+            if let Err(e) = validate_safe_name(container) {
+                return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": e}});
+            }
+            let result = tokio::process::Command::new("docker").args(["restart", container]).output().await;
             match result {
                 Ok(o) if o.status.success() => json!({"ok": true, "container": container}),
                 Ok(o) => json!({"ok": false, "error": {"message": String::from_utf8_lossy(&o.stderr)}}),
@@ -8820,20 +8893,26 @@ fn recall_relevant_memory(items: &[MemoryItem], latest_user: &str) -> Vec<String
 }
 
 /// 构建系统提示词（含记忆注入）
-fn build_system_prompt(state: &AppState, latest_user: &str) -> String {
+/// extra_memory：V3 记忆引擎召回的向量/图谱上下文（由调用方异步召回后传入）
+fn build_system_prompt(state: &AppState, latest_user: &str, extra_memory: &[String]) -> String {
     let mut parts = vec![
         "你是 CradleRing 的 AI 助手。你可以使用工具来帮助用户：搜索网络、执行命令、读写文件、保存记忆。".to_string(),
         "当需要外部信息或操作时，主动调用工具；能直接回答时直接回答。".to_string(),
         "请用简洁、准确的中文回答用户。".to_string(),
     ];
 
-    // 注入记忆
-    let memory = state.storage.load_memory();
-    if !memory.is_empty() {
-        let recalled = recall_relevant_memory(&memory, latest_user);
-        if !recalled.is_empty() {
-            parts.push("\n相关记忆（用户先前保存的，可作为回答依据）：".to_string());
-            parts.extend(recalled);
+    // 注入记忆（V3 引擎优先，V2 关键词兜底）
+    if !extra_memory.is_empty() {
+        parts.push("\n相关记忆（用户先前保存的，可作为回答依据）：".to_string());
+        parts.extend(extra_memory.iter().cloned());
+    } else {
+        let memory = state.storage.load_memory();
+        if !memory.is_empty() {
+            let recalled = recall_relevant_memory(&memory, latest_user);
+            if !recalled.is_empty() {
+                parts.push("\n相关记忆（用户先前保存的，可作为回答依据）：".to_string());
+                parts.extend(recalled);
+            }
         }
     }
 
@@ -10029,6 +10108,7 @@ async fn stream_llm_call(
     run_id: &str,
     messages: Vec<serde_json::Value>,
     tools: &serde_json::Value,
+    model_override: Option<&str>,
 ) -> Result<StreamResult, String> {
     // 多 provider fallback：依次尝试每个启用的 provider，遇到可重试错误（超时/429/5xx）切换下一个。
     let providers = state.config.enabled_providers();
@@ -10040,7 +10120,7 @@ async fn stream_llm_call(
     let mut tried_any = false;
     for (idx, provider) in providers.iter().enumerate() {
         tried_any = true;
-        match stream_llm_call_single(state, session_key, run_id, messages.clone(), tools, provider).await {
+        match stream_llm_call_single(state, session_key, run_id, messages.clone(), tools, provider, model_override).await {
             Ok(r) => return Ok(r),
             Err(e) => {
                 let retriable = is_retriable_error(&e);
@@ -10100,8 +10180,10 @@ async fn stream_llm_call_single(
     messages: Vec<serde_json::Value>,
     tools: &serde_json::Value,
     provider: &ProviderCfg,
+    model_override: Option<&str>,
 ) -> Result<StreamResult, String> {
-    let model = provider.effective_model(&state.config.default_model);
+    // 级联路由（RouteLLM）：model_override 优先于 provider 默认模型
+    let model: &str = model_override.unwrap_or_else(|| provider.effective_model(&state.config.default_model));
 
     // 构造请求体（按 provider 能力附加 thinking）
     let mut body = serde_json::json!({
@@ -10759,9 +10841,10 @@ async fn execute_tool_with_ctx(
             }
             match tokio::fs::read_to_string(path).await {
                 Ok(content) => {
-                    // 限制输出长度
+                    // 限制输出长度（修复：UTF-8 安全截断，中文文件不会 panic）
                     if content.len() > 16_000 {
-                        format!("{}...(文件过长，已截断，共 {} 字节)", &content[..16_000], content.len())
+                        let cut: String = content.chars().take(16_000).collect();
+                        format!("{}...(文件过长，已截断，共 {} 字节)", cut, content.len())
                     } else {
                         content
                     }
@@ -12118,12 +12201,14 @@ async fn tool_exec(command: &str) -> String {
             let stdout_raw = String::from_utf8_lossy(&out.stdout).to_string();
             let stderr_raw = String::from_utf8_lossy(&out.stderr).to_string();
             let code = out.status.code().unwrap_or(-1);
-            // 按策略截断
+            // 按策略截断（修复：UTF-8 安全截断）
             let stdout = if stdout_raw.len() > stdout_cap {
-                format!("{}...(已截断 {}/{} 字节)", &stdout_raw[..stdout_cap], stdout_cap, stdout_raw.len())
+                let cut: String = stdout_raw.chars().take(stdout_cap).collect();
+                format!("{}...(已截断 {}/{} 字节)", cut, stdout_cap, stdout_raw.len())
             } else { stdout_raw };
             let stderr = if stderr_raw.len() > stderr_cap {
-                format!("{}...(已截断)", &stderr_raw[..stderr_cap])
+                let cut: String = stderr_raw.chars().take(stderr_cap).collect();
+                format!("{}...(已截断)", cut)
             } else { stderr_raw };
             let mut result_str = String::new();
             if !stdout.is_empty() { result_str.push_str(&stdout); }
@@ -12370,8 +12455,13 @@ fn extract_title(html: &str) -> String {
 
 /// browse 工具：抓取网页 / 模拟点击 / 截图。
 async fn tool_browse(url: &str, action: &str, _selector: &str) -> String {
+    // SSRF 防护：拦截内网/环回/云元数据地址
+    if let Err(e) = ssrf_check_url(url).await {
+        return format!("请求被拦截: {}", e);
+    }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::none())  // 禁重定向（防绕过 SSRF 检查）
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -12398,7 +12488,11 @@ async fn tool_browse(url: &str, action: &str, _selector: &str) -> String {
     if !resp.status().is_success() { return format!("HTTP {}", resp.status()); }
     let html = resp.text().await.unwrap_or_default();
     let text = strip_html_tags(&html);
-    if text.len() > 8000 { format!("{}...\n[截断]", &text[..8000]) } else { text }
+    // 修复：UTF-8 安全截断
+    if text.chars().count() > 8000 {
+        let cut: String = text.chars().take(8000).collect();
+        format!("{}...\n[截断]", cut)
+    } else { text }
 }
 
 // ============================================================================
@@ -12407,12 +12501,19 @@ async fn tool_browse(url: &str, action: &str, _selector: &str) -> String {
 
 async fn tool_port_scan(target: &str, ports: &str, timeout_ms: u64) -> String {
     if target.is_empty() { return "错误: 缺少 target".into(); }
+    // SSRF 防护：端口扫描仅限外部目标（内网扫描需走 exec 由审批控制）
+    let check_url = format!("http://{}", target);
+    if let Err(e) = ssrf_check_url(&check_url).await {
+        return format!("扫描被拦截: {}", e);
+    }
     let port_list: Vec<u16> = if ports.contains('-') {
         let parts: Vec<&str> = ports.split('-').collect();
         if parts.len() == 2 { (parts[0].parse().unwrap_or(1)..=parts[1].parse().unwrap_or(1000)).collect() }
         else { vec![80,443,22,3306,8080] }
     } else if ports.contains(',') { ports.split(',').filter_map(|p| p.trim().parse().ok()).collect() }
     else { vec![80,443,22,3306,8080] };
+    // 限制端口数量（防 DoS：最多 1000 个端口）
+    let port_list: Vec<u16> = port_list.into_iter().take(1000).collect();
     let mut open = Vec::new();
     for port in &port_list {
         if tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), tokio::net::TcpStream::connect(format!("{}:{}", target, port))).await.is_ok() {
@@ -12425,7 +12526,15 @@ async fn tool_port_scan(target: &str, ports: &str, timeout_ms: u64) -> String {
 
 async fn tool_http_probe(url: &str, method: &str, body: &str, timeout_ms: u64) -> String {
     if url.is_empty() { return "错误: 缺少 url".into(); }
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_millis(timeout_ms)).build().unwrap_or_default();
+    // SSRF 防护
+    if let Err(e) = ssrf_check_url(url).await {
+        return format!("请求被拦截: {}", e);
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(timeout_ms))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap_or_default();
     let req = match method.to_uppercase().as_str() {
         "POST" => client.post(url).body(body.to_string()),
         "PUT" => client.put(url).body(body.to_string()),
@@ -12440,23 +12549,48 @@ async fn tool_http_probe(url: &str, method: &str, body: &str, timeout_ms: u64) -
 }
 
 async fn tool_dns_lookup(domain: &str, rt: &str) -> String {
-    match tokio::process::Command::new("sh").arg("-c").arg(format!("dig +short {} {} 2>/dev/null || nslookup -type={} {} 2>/dev/null", domain, rt, rt, domain)).output().await {
-        Ok(o) => { let s = String::from_utf8_lossy(&o.stdout).to_string(); if s.trim().is_empty() { format!("DNS {} {}：无记录", rt, domain) } else { format!("DNS {} {}：\n{}", rt, domain, s.trim()) } }
+    // 安全修复：域名格式校验（防命令注入）
+    if let Err(e) = validate_domain_str(domain) {
+        return format!("错误: {}", e);
+    }
+    // 记录类型白名单
+    let rt_safe = match rt.to_uppercase().as_str() {
+        "A" | "AAAA" | "CNAME" | "MX" | "TXT" | "NS" | "SOA" | "PTR" | "SRV" | "CAA" => rt.to_uppercase(),
+        _ => "A".to_string(),
+    };
+    // 参数化调用 dig，不经 shell
+    match tokio::process::Command::new("dig").args(["+short", &rt_safe, domain]).output().await {
+        Ok(o) => { let s = String::from_utf8_lossy(&o.stdout).to_string(); if s.trim().is_empty() { format!("DNS {} {}：无记录", rt_safe, domain) } else { format!("DNS {} {}：\n{}", rt_safe, domain, s.trim()) } }
         Err(_) => format!("DNS 查询工具不可用"),
     }
 }
 
 async fn tool_ssl_check(host: &str, port: u16) -> String {
-    match tokio::process::Command::new("sh").arg("-c").arg(format!("echo | timeout 10 openssl s_client -connect {}:{} -servername {} 2>/dev/null | openssl x509 -noout -dates -subject -issuer 2>/dev/null", host, port, host)).output().await {
+    // 安全修复：域名格式校验
+    if let Err(e) = validate_domain_str(host) {
+        return format!("错误: {}", e);
+    }
+    let port_s = port.to_string();
+    match tokio::process::Command::new("sh").arg("-c").arg(format!("echo | timeout 10 openssl s_client -connect {}:{} -servername {} 2>/dev/null | openssl x509 -noout -dates -subject -issuer 2>/dev/null", host, port_s, host)).output().await {
         Ok(o) => { let s = String::from_utf8_lossy(&o.stdout).to_string(); if s.trim().is_empty() { format!("SSL {}:{}：无法连接或无证书", host, port) } else { s } }
         Err(_) => format!("openssl 不可用"),
     }
 }
 
 async fn tool_subdomain_enum(domain: &str) -> String {
+    // 安全修复：域名格式校验（防命令注入）
+    if let Err(e) = validate_domain_str(domain) {
+        return format!("错误: {}", e);
+    }
     let subs = ["www","mail","admin","api","dev","staging","vpn","portal","app","shop","ns1","smtp","git","ci","grafana","redis","db","cdn","static"];
     let mut found = Vec::new();
-    for s in &subs { let d = format!("{}.{}", s, domain); if let Ok(o) = tokio::process::Command::new("sh").arg("-c").arg(format!("getent hosts {} 2>/dev/null || dig +short {} A 2>/dev/null", d, d)).output().await { if !String::from_utf8_lossy(&o.stdout).trim().is_empty() { found.push(d); } } }
+    for s in &subs {
+        let d = format!("{}.{}", s, domain);
+        // 参数化调用 dig，不经 shell
+        if let Ok(o) = tokio::process::Command::new("dig").args(["+short", "A", &d]).output().await {
+            if !String::from_utf8_lossy(&o.stdout).trim().is_empty() { found.push(d); }
+        }
+    }
     if found.is_empty() { format!("子域名枚举 {}：未发现", domain) } else { format!("子域名枚举 {}：发现 {} 个\n{}", domain, found.len(), found.iter().map(|s| format!("  {}", s)).collect::<Vec<_>>().join("\n")) }
 }
 
@@ -13658,15 +13792,52 @@ fn base64_decode_str(s: &str) -> Option<String> {
 }
 
 async fn tool_git_ops(command: &str, repo: &str) -> String {
-    tokio::process::Command::new("sh").arg("-c").arg(format!("cd '{}' && git {} 2>&1", repo, command)).output().await.map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or("git 失败".into())
+    // 安全修复：repo 路径校验（防引号逃逸 + 路径穿越），command 白名单
+    let repo_safe = match files_check_path(repo, false) {
+        Ok(p) => p,
+        Err(e) => return format!("错误: {}", e),
+    };
+    // git 子命令白名单（防任意命令注入）
+    let cmd_lower = command.trim().to_lowercase();
+    let allowed_verbs = ["status", "log", "diff", "show", "branch", "fetch", "pull", "add", "commit", "push", "checkout", "stash", "tag", "remote", "rev-parse", "blame", "grep", "ls-files"];
+    let verb = cmd_lower.split_whitespace().next().unwrap_or("");
+    if !allowed_verbs.contains(&verb) {
+        return format!("错误: 不允许的 git 子命令: {}（允许: {}）", verb, allowed_verbs.join(", "));
+    }
+    // 禁止 shell 元字符（防注入到 sh -c）
+    if command.chars().any(|c| matches!(c, ';' | '|' | '&' | '$' | '`' | '<' | '>' | '\n' | '\r')) {
+        return "错误: 命令包含非法字符".to_string();
+    }
+    tokio::process::Command::new("sh").arg("-c").arg(format!("cd '{}' && git {} 2>&1", repo_safe, command)).output().await.map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or("git 失败".into())
 }
 
 async fn tool_docker_ops(command: &str, container: &str) -> String {
+    // 安全修复：docker 子命令白名单 + 容器名校验
+    let cmd_lower = command.trim().to_lowercase();
+    let allowed_verbs = ["ps", "images", "logs", "inspect", "stats", "top", "port", "exec", "start", "stop", "restart", "pause", "unpause", "pull", "build", "network", "volume", "version", "info", "system"];
+    let verb = cmd_lower.split_whitespace().next().unwrap_or("");
+    if !allowed_verbs.contains(&verb) {
+        return format!("错误: 不允许的 docker 子命令: {}", verb);
+    }
+    if command.chars().any(|c| matches!(c, ';' | '|' | '&' | '$' | '`' | '<' | '>' | '\n' | '\r')) {
+        return "错误: 命令包含非法字符".to_string();
+    }
+    if !container.is_empty() {
+        if let Err(e) = validate_safe_name(container) {
+            return format!("错误: {}", e);
+        }
+    }
     let cmd = if container.is_empty() { format!("docker {} 2>&1", command) } else { format!("docker {} {} 2>&1", command, container) };
     tokio::process::Command::new("sh").arg("-c").arg(cmd).output().await.map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or("docker 失败".into())
 }
 
 async fn tool_process_manage(action: &str, name: &str) -> String {
+    // 安全修复：服务名校验（防命令注入）
+    if !name.is_empty() {
+        if let Err(e) = validate_safe_name(name) {
+            return format!("错误: {}", e);
+        }
+    }
     let cmd = match action {
         "list" => "ps aux --sort=-%mem | head -20".to_string(),
         "status" => format!("systemctl status {} 2>&1 || service {} status 2>&1", name, name),
@@ -13679,9 +13850,22 @@ async fn tool_process_manage(action: &str, name: &str) -> String {
 }
 
 async fn tool_backup_create(source: &str, dest: &str, format: &str) -> String {
-    let cmd = match format { "zip" => format!("zip -r '{}' '{}' 2>&1", dest, source), _ => format!("tar czf '{}' '{}' 2>&1", dest, source) };
-    match tokio::process::Command::new("sh").arg("-c").arg(cmd).output().await {
-        Ok(o) if o.status.success() => { let size = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0); format!("备份完成: {} → {} ({}KB)", source, dest, size/1024) }
+    // 安全修复：路径校验（防引号逃逸 + 路径穿越）
+    let src_safe = match files_check_path(source, false) {
+        Ok(p) => p,
+        Err(e) => return format!("错误: source {}", e),
+    };
+    let dest_safe = match files_check_path(dest, true) {
+        Ok(p) => p,
+        Err(e) => return format!("错误: dest {}", e),
+    };
+    // 参数化调用，不经 shell
+    let result = match format {
+        "zip" => tokio::process::Command::new("zip").args(["-r", &dest_safe, &src_safe]).output().await,
+        _ => tokio::process::Command::new("tar").args(["czf", &dest_safe, &src_safe]).output().await,
+    };
+    match result {
+        Ok(o) if o.status.success() => { let size = std::fs::metadata(&dest_safe).map(|m| m.len()).unwrap_or(0); format!("备份完成: {} → {} ({}KB)", src_safe, dest_safe, size/1024) }
         Ok(o) => format!("备份失败: {}", String::from_utf8_lossy(&o.stderr)),
         Err(e) => format!("备份失败: {}", e),
     }
@@ -13836,14 +14020,15 @@ fn jwt_secret(state: &AppState) -> String {
         let s = s.trim().to_string();
         if !s.is_empty() { return s; }
     }
-    let s = format!("{:032x}", rand_u128());
+    // 安全修复：CSPRNG（之前 rand_u128 以毫秒做种子，可按启动时间穷举伪造 JWT）
+    let s = format!("{:032x}", secure_rand_u128());
     let _ = std::fs::write(&path, &s);
     s
 }
 
 /// 生成随机 salt（16 字节 hex）
 fn gen_salt() -> String {
-    format!("{:016x}{:016x}", rand_u128(), rand_u128())
+    format!("{:016x}{:016x}", secure_rand_u128(), secure_rand_u128())
 }
 
 /// salted SHA-256：返回 "salt$hash"
@@ -13979,19 +14164,13 @@ async fn ensure_default_admin(state: &AppState) {
 
 /// 生成随机密码（16位，字母数字+特殊字符）
 fn generate_random_password() -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    current_ms().hash(&mut hasher);
-    rand_u128().hash(&mut hasher);
-    let hash = hasher.finish();
-    // 转为 16 位可读密码（字母数字+特殊字符）
+    // 安全修复：CSPRNG（之前用 current_ms + rand_u128，可按安装时间穷举初始 admin 密码）
+    use rand::RngCore;
     let charset = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*";
+    let mut rng = rand::rngs::OsRng;
     let mut pwd = String::new();
-    let mut h = hash;
     for _ in 0..16 {
-        pwd.push(charset[(h % charset.len() as u64) as usize] as char);
-        h = h.wrapping_mul(6364136223846793005).wrapping_add(1);
+        pwd.push(charset[(rng.next_u32() as usize) % charset.len()] as char);
     }
     pwd
 }
@@ -15093,7 +15272,7 @@ async fn exec_llm_workflow_node(
         json!({"role": "user", "content": prompt}),
     ];
     let tools = serde_json::json!([]);
-    let result = stream_llm_call(state, "workflow", "wf", messages, &tools).await
+    let result = stream_llm_call(state, "workflow", "wf", messages, &tools, None).await
         .map_err(|e| format!("LLM 调用失败: {}", e))?;
     span.tokens_in = Some(estimate_tokens(&[json!({"content": prompt})]) as u64);
     span.tokens_out = Some(estimate_tokens(&[json!({"content": &result.text})]) as u64);
@@ -15175,7 +15354,7 @@ async fn exec_parallel_workflow_node(
                 json!({"role": "system", "content": "请汇总以下多个子任务的结果，给出简洁摘要。"}),
                 json!({"role": "user", "content": combined}),
             ];
-            stream_llm_call(state, "workflow", "reduce", msgs, &json!([])).await
+            stream_llm_call(state, "workflow", "reduce", msgs, &json!([]), None).await
                 .map(|r| r.text).unwrap_or(combined)
         }
         _ => result.join("\n\n"),
@@ -15315,7 +15494,7 @@ async fn execute_role_agent(
     for iteration in 0..max_iter {
         let mut iter_span = TraceSpan::new("iteration", &format!("iter {}", iteration + 1), Some(&agent_span.id));
         let ctx_messages = build_context_messages_v2(&messages, 100_000, 20);
-        match stream_llm_call(state, session_key, "role", ctx_messages, &tools).await {
+        match stream_llm_call(state, session_key, "role", ctx_messages, &tools, None).await {
             Ok(result) => {
                 iter_span.tokens_out = Some(estimate_tokens(&[json!({"content": &result.text})]) as u64);
                 if !result.tool_calls.is_empty() {
@@ -15676,11 +15855,60 @@ async fn run_agent_loop(state: Arc<AppState>, session_key: &str, run_id: &str) {
     if messages.is_empty() { return; }
     let mut current_messages = messages.clone();
     let tools = build_tools_schema();
+
+    // ============ Cache-First：V3 记忆引擎（L1/L2 缓存 + L4 召回 + 级联路由）============
+    let initial_user = current_messages.iter().rev().find(|m| m.role == "user").map(|m| m.content.clone()).unwrap_or_default();
+    let mut memory_context: Vec<String> = vec![];
+    let mut model_override: Option<String> = None;
+    if !initial_user.is_empty() {
+        if let Ok(engine) = state.memory().await {
+            let recall_req = RecallRequest {
+                query: initial_user.clone(),
+                session_key: Some(session_key.to_string()),
+                top_k: 5,
+                use_l1: true,
+                use_l2: true,
+                use_l4: true,
+                use_graph: true,
+            };
+            if let Ok(recall) = engine.recall(recall_req).await {
+                // L1/L2 缓存命中 → 直接返回缓存答案（0 成本，跳过 LLM）
+                if let Some(cached) = recall.cache_hit.or(recall.semantic_hit) {
+                    let answer = cached.answer.clone();
+                    state.storage.append_message(session_key, &Message {
+                        role: "assistant".into(),
+                        content: answer.clone(),
+                        timestamp: current_ms(),
+                        attachments: vec![],
+                    });
+                    broadcast_chat_event(&state, session_key, run_id, json!({"deltaText": answer})).await;
+                    broadcast_event(&state, "chat.complete", json!({
+                        "sessionKey": session_key, "runId": run_id, "cached": true,
+                        "cacheModel": cached.model,
+                    })).await;
+                    return;
+                }
+                // L4 记忆上下文注入（向量检索 + 图谱实体）
+                for hit in &recall.vector_hits {
+                    let kind = hit.record.metadata.get("kind").and_then(|v| v.as_str()).unwrap_or("fact");
+                    memory_context.push(format!("- [{}] {}", kind, hit.record.text));
+                }
+                for e in &recall.graph_entities {
+                    memory_context.push(format!("- [实体] {}（{}）", e.name, e.kind));
+                }
+                // 级联路由：简单问题走小模型（RouteLLM）
+                if matches!(recall.route.tier, memory_engine::RouteTier::Small) && !recall.route.suggested_model.is_empty() {
+                    model_override = Some(recall.route.suggested_model.clone());
+                }
+            }
+        }
+    }
+
     for iteration in 0..10 {
         let latest_user = current_messages.iter().rev().find(|m| m.role == "user").map(|m| m.content.as_str()).unwrap_or("");
-        let system_prompt = build_system_prompt(&state, latest_user);
+        let system_prompt = build_system_prompt(&state, latest_user, &memory_context);
         let ctx_messages = build_context_messages(&system_prompt, &current_messages, 100_000, 20);
-        match stream_llm_call(&state, session_key, run_id, ctx_messages, &tools).await {
+        match stream_llm_call(&state, session_key, run_id, ctx_messages, &tools, model_override.as_deref()).await {
             Ok(result) => {
                 broadcast_chat_event(&state, session_key, run_id, json!({"deltaText": result.text})).await;
                 if !result.tool_calls.is_empty() {
@@ -15696,6 +15924,13 @@ async fn run_agent_loop(state: Arc<AppState>, session_key: &str, run_id: &str) {
                 }
                 if !result.text.is_empty() {
                     state.storage.append_message(session_key, &Message { role: "assistant".into(), content: result.text.clone(), timestamp: current_ms(), attachments: vec![] });
+                    // 写入 L1/L2 缓存（下次相同问题直接命中，0 成本）
+                    if !initial_user.is_empty() {
+                        if let Ok(engine) = state.memory().await {
+                            let used_model = model_override.clone().unwrap_or_else(|| state.config.default_model.clone());
+                            let _ = engine.cache_answer(&initial_user, &result.text, Some(session_key), &used_model).await;
+                        }
+                    }
                 }
                 break;
             }
@@ -15716,9 +15951,9 @@ async fn run_subagent_loop(state: &AppState, session_key: &str, _model: Option<&
     let tools = build_tools_schema();
     for _ in 0..max_iter {
         let latest_user = current_messages.iter().rev().find(|m| m.role == "user").map(|m| m.content.as_str()).unwrap_or("");
-        let system_prompt = build_system_prompt(state, latest_user);
+        let system_prompt = build_system_prompt(state, latest_user, &[]);
         let ctx_messages = build_context_messages(&system_prompt, &current_messages, 100_000, 20);
-        match stream_llm_call(state, session_key, "sub", ctx_messages, &tools).await {
+        match stream_llm_call(state, session_key, "sub", ctx_messages, &tools, None).await {
             Ok(result) => {
                 if !result.tool_calls.is_empty() {
                     for tc in &result.tool_calls {
@@ -15791,6 +16026,171 @@ fn strip_html_tags(html: &str) -> String {
     result.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// 文件管理器路径安全校验
+///
+/// 防护点：
+/// 1. 拒绝 `..` 路径穿越（/tmp/../../etc/shadow）
+/// 2. canonicalize 解析符号链接后的真实路径必须在白名单内（/tmp/link → /root/.ssh）
+/// 3. 写操作（for_write=true）额外禁止 /etc、/root（防写 cron.d/authorized_keys 提权）
+///
+/// for_write=false（读）：目标必须存在（canonicalize 要求存在）
+/// for_write=true（写）：目标可以不存在，但父目录必须存在且通过校验
+fn files_check_path(path: &str, for_write: bool) -> Result<String, String> {
+    use std::path::{Path, PathBuf};
+
+    // 显式拒绝 ..（即使在白名单前缀内）
+    if path.split('/').any(|seg| seg == "..") {
+        return Err("路径包含 ..（路径穿越）".to_string());
+    }
+    if path.is_empty() || !path.starts_with('/') {
+        return Err("必须是绝对路径".to_string());
+    }
+
+    // 白名单（读）：常用运维目录
+    let read_allowed = ["/home", "/var", "/opt", "/srv", "/data", "/tmp", "/etc", "/root", "/usr/local"];
+    // 白名单（写）：去掉 /etc /root，防提权
+    let write_allowed = ["/home", "/var", "/opt", "/srv", "/data", "/tmp", "/usr/local"];
+    let allowed: &[&str] = if for_write { &write_allowed } else { &read_allowed };
+
+    let target = Path::new(path);
+
+    // canonicalize：目标存在时直接解析；不存在时解析父目录再拼接文件名
+    let real: PathBuf = if target.exists() {
+        target.canonicalize().map_err(|e| format!("路径解析失败: {}", e))?
+    } else {
+        if !for_write {
+            return Err("路径不存在".to_string());
+        }
+        // 向上找到第一个存在的祖先目录
+        let mut ancestor: Option<&Path> = None;
+        let mut p = target.parent();
+        while let Some(dir) = p {
+            if dir.exists() { ancestor = Some(dir); break; }
+            p = dir.parent();
+        }
+        let ancestor = ancestor.ok_or_else(|| "父目录不存在".to_string())?;
+        let canon_ancestor = ancestor.canonicalize().map_err(|e| format!("父目录解析失败: {}", e))?;
+        // 用解析后的祖先 + 相对部分重建路径
+        let rel = target.strip_prefix(ancestor).map_err(|_| "路径重建失败".to_string())?;
+        if rel.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+            return Err("路径包含 ..（路径穿越）".to_string());
+        }
+        canon_ancestor.join(rel)
+    };
+
+    let real_str = real.to_string_lossy().to_string();
+    // canonicalize 后必须仍在白名单内（符号链接穿越检测）
+    if !allowed.iter().any(|p| real_str == *p || real_str.starts_with(&format!("{}/", p))) {
+        return Err(format!("路径不在白名单（真实路径: {}）", real_str));
+    }
+    Ok(real_str)
+}
+
+/// SSRF 出站请求安全检查
+///
+/// 拦截目标（防云元数据窃取 169.254.169.254、内网探测、网关自我提权）：
+/// - 环回 127.0.0.0/8、::1
+/// - 私有 10.0.0.0/8、172.16.0.0/12、192.168.0.0/16
+/// - 链路本地 169.254.0.0/16（含云元数据）、fe80::/10
+/// - 未指定地址 0.0.0.0
+/// - localhost / *.local / metadata.google.internal 等主机名
+///
+/// 同时解析 DNS 检查解析结果 IP（防 DNS rebinding：evil.com 解析到 127.0.0.1）。
+/// 返回 Err(原因) 表示应拒绝。
+async fn ssrf_check_url(url: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(url).map_err(|e| format!("URL 解析失败: {}", e))?;
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Err(format!("不允许的协议: {}（仅允许 http/https）", scheme));
+    }
+    let host = parsed.host_str().ok_or_else(|| "URL 缺少主机".to_string())?.to_lowercase();
+
+    // 主机名黑名单
+    let blocked_names = ["localhost", "metadata.google.internal", "kubernetes.default.svc"];
+    if blocked_names.iter().any(|n| host == *n) || host.ends_with(".local") || host.ends_with(".internal") {
+        return Err(format!("目标主机被 SSRF 策略拦截: {}", host));
+    }
+
+    // 直接是 IP 的情况
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return ssrf_check_ip(&ip);
+    }
+
+    // 域名：解析 DNS 后检查所有解析结果（任一命中私有即拒绝）
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    match tokio::net::lookup_host(format!("{}:{}", host, port)).await {
+        Ok(addrs) => {
+            let mut checked = 0;
+            for addr in addrs {
+                checked += 1;
+                if ssrf_check_ip(&addr.ip()).is_err() {
+                    return Err(format!("目标域名 {} 解析到内网地址 {}（SSRF 拦截）", host, addr.ip()));
+                }
+            }
+            if checked == 0 {
+                return Err(format!("域名 {} 无法解析", host));
+            }
+        }
+        Err(e) => return Err(format!("DNS 解析失败: {}", e)),
+    }
+    Ok(())
+}
+
+/// 检查单个 IP 是否为内网/环回/链路本地地址
+fn ssrf_check_ip(ip: &std::net::IpAddr) -> Result<(), String> {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            let blocked = o[0] == 127                    // 环回
+                || o[0] == 10                            // 私有 A
+                || (o[0] == 172 && (16..=31).contains(&o[1]))  // 私有 B
+                || (o[0] == 192 && o[1] == 168)          // 私有 C
+                || (o[0] == 169 && o[1] == 254)          // 链路本地（含云元数据）
+                || o[0] == 0;                            // 未指定
+            if blocked { Err(format!("内网地址被 SSRF 策略拦截: {}", ip)) } else { Ok(()) }
+        }
+        std::net::IpAddr::V6(v6) => {
+            let blocked = v6.is_loopback()
+                || v6.is_unspecified()
+                || (v6.segments()[0] & 0xffc0) == 0xfe80;  // fe80::/10 链路本地
+            if blocked { Err(format!("内网地址被 SSRF 策略拦截: {}", ip)) } else { Ok(()) }
+        }
+    }
+}
+
+/// 校验 IP 地址格式（防命令注入）
+fn validate_ip_str(ip: &str) -> Result<(), String> {
+    ip.parse::<std::net::IpAddr>()
+        .map(|_| ())
+        .map_err(|_| format!("非法 IP 地址: {}", ip))
+}
+
+/// 校验域名格式（防命令注入）：仅允许 [a-zA-Z0-9.-]，每段 1-63 字符，总长 ≤253
+fn validate_domain_str(domain: &str) -> Result<(), String> {
+    if domain.is_empty() || domain.len() > 253 {
+        return Err(format!("非法域名长度: {}", domain));
+    }
+    if !domain.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-') {
+        return Err(format!("域名包含非法字符: {}", domain));
+    }
+    if domain.split('.').any(|seg| seg.is_empty() || seg.len() > 63 || seg.starts_with('-') || seg.ends_with('-')) {
+        return Err(format!("非法域名格式: {}", domain));
+    }
+    Ok(())
+}
+
+/// 校验安全名称（服务名/容器名/进程名）：仅允许 [a-zA-Z0-9._:@+-]，≤128 字符
+/// 拒绝 shell 元字符（空格 ; | & $ ` < > \ " ' 等）
+fn validate_safe_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > 128 {
+        return Err("名称长度非法".to_string());
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '@' | '+' | '-' | '/')) {
+        return Err(format!("名称包含非法字符: {}", name));
+    }
+    Ok(())
+}
+
 /// Cron 调度器后台循环
 async fn cron_scheduler_loop(state: Arc<AppState>) {
     loop {
@@ -15801,12 +16201,46 @@ async fn cron_scheduler_loop(state: Arc<AppState>) {
 }
 
 /// WebSocket 连接处理
+/// 安全要求：
+/// 1. Origin 检查：浏览器跨站 WebSocket 可绕过 CORS，必须校验 Origin 与 Host 一致
+/// 2. 认证：首帧必须是 hello/connect 并携带有效凭据（JWT 或网关 token），
+///    未认证前不处理任何其他 RPC（此前完全不校验，等于未授权 RCE）
 async fn handle_websocket_connection(
     mut stream: tokio::net::TcpStream,
     request: String,
     state: Arc<AppState>,
 ) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // ---- Origin 检查（防浏览器跨站 WS 攻击）----
+    // 浏览器发的 WS 握手必带 Origin；非浏览器（curl/脚本）通常不带，放行由后续认证兜底
+    let origin = request.lines()
+        .find(|l| l.to_lowercase().starts_with("origin:"))
+        .and_then(|l| l.splitn(2, ':').nth(1))
+        .map(|s| s.trim().to_string());
+    let host = request.lines()
+        .find(|l| l.to_lowercase().starts_with("host:"))
+        .and_then(|l| l.splitn(2, ':').nth(1))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    if let Some(o) = &origin {
+        // 提取 origin 的 host 部分（去掉 scheme 和端口差异的尾斜杠）
+        let origin_host = o.trim_start_matches("http://").trim_start_matches("https://")
+            .trim_end_matches('/').to_string();
+        // 仅当 Origin host 与 Host 不一致时拒绝（允许端口不同的反代场景，仅比对主机名）
+        let origin_name = origin_host.split(':').next().unwrap_or("");
+        let host_name = host.split(':').next().unwrap_or("");
+        let trusted = origin_name.is_empty()
+            || host_name.is_empty()
+            || origin_name == host_name
+            || origin_name == "localhost" || origin_name == "127.0.0.1"
+            || host_name == "localhost" || host_name == "127.0.0.1";
+        if !trusted {
+            let resp = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n";
+            let _ = stream.write_all(resp.as_bytes()).await;
+            return;
+        }
+    }
 
     // 提取 Sec-WebSocket-Key
     let key = request.lines()
@@ -15834,11 +16268,23 @@ async fn handle_websocket_connection(
     });
     send_ws_text(&mut stream, &challenge.to_string()).await;
 
+    let mut authenticated = false;
+    let auth_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut buf = vec![0u8; 65536];
+
     loop {
-        let n = match stream.read(&mut buf).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => n,
+        // 未认证时 10 秒超时强制断开
+        let read_fut = stream.read(&mut buf);
+        let n = if authenticated {
+            match read_fut.await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            }
+        } else {
+            match tokio::time::timeout_at(auth_deadline, read_fut).await {
+                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                Ok(Ok(n)) => n,
+            }
         };
         if n < 2 { continue; }
         let opcode = buf[0] & 0x0f;
@@ -15846,28 +16292,99 @@ async fn handle_websocket_connection(
         if opcode == 0x9 { let _ = stream.write_all(&[0x8a, 0x00]).await; continue; } // Ping→Pong
         if opcode != 0x1 { continue; }
 
-        // 解析 WS 帧
+        // 解析 WS 帧（修复：payload_len 上限 + checked_add 防整数溢出 + UTF-8 正确解码）
         let masked = (buf[1] & 0x80) != 0;
         let len_byte = buf[1] & 0x7f;
-        let (payload_len, mut start) = match len_byte {
+        let (payload_len, mut start): (usize, usize) = match len_byte {
             0..=125 => (len_byte as usize, 2),
             126 => { if n < 4 { continue; } (((buf[2] as usize) << 8) | (buf[3] as usize), 4) }
-            _ => { if n < 10 { continue; } (u64::from_be_bytes([buf[2],buf[3],buf[4],buf[5],buf[6],buf[7],buf[8],buf[9]]) as usize, 10) }
+            _ => {
+                if n < 10 { continue; }
+                let l = u64::from_be_bytes([buf[2],buf[3],buf[4],buf[5],buf[6],buf[7],buf[8],buf[9]]);
+                // 上限 1MB，防止 as usize 截断/溢出
+                if l > 1_048_576 { send_ws_close(&mut stream).await; break; }
+                (l as usize, 10)
+            }
         };
         let mut mask = [0u8; 4];
-        if masked { if start + 4 > n { continue; } mask.copy_from_slice(&buf[start..start+4]); start += 4; }
-        if start + payload_len > n { continue; }
-        let text: String = (0..payload_len).map(|i| (buf[start+i] ^ mask[i%4]) as char).collect();
+        if masked {
+            if start.checked_add(4).map_or(true, |e| e > n) { continue; }
+            mask.copy_from_slice(&buf[start..start+4]);
+            start += 4;
+        }
+        // checked_add 防 start + payload_len 溢出回绕
+        let end = match start.checked_add(payload_len) {
+            Some(e) => e,
+            None => { send_ws_close(&mut stream).await; break; }
+        };
+        if end > n { continue; }
+        // 修复：按字节 unmask 后 UTF-8 解码（之前 as char 按 Latin-1 转换，破坏所有中文）
+        let mut payload = buf[start..end].to_vec();
+        for i in 0..payload.len() { payload[i] ^= mask[i % 4]; }
+        let text = match String::from_utf8(payload) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
 
         if let Ok(req) = serde_json::from_str::<serde_json::Value>(&text) {
             let method = req["method"].as_str().unwrap_or("");
             let id = req["id"].as_str().unwrap_or("0");
             let params = req["params"].clone();
+
+            // ---- 认证门控 ----
+            if !authenticated {
+                let is_auth_method = matches!(method, "hello" | "connect" | "auth" | "auth.login" | "login");
+                if !is_auth_method {
+                    let resp = json!({"type": "res", "id": id, "ok": false, "error": {"code": "UNAUTHORIZED", "message": "未认证：请先发送 hello/connect 完成认证"}});
+                    send_ws_text(&mut stream, &resp.to_string()).await;
+                    continue;
+                }
+                // 校验凭据：JWT（auth_token）或网关 token（token）
+                let auth_token = params["auth_token"].as_str().or(params["authToken"].as_str()).unwrap_or("");
+                let gw_token = params["token"].as_str().unwrap_or("");
+                let jwt_ok = !auth_token.is_empty() && verify_jwt(auth_token, &state).is_some();
+                let gw_ok = !gw_token.is_empty() && constant_time_eq(gw_token.as_bytes(), state.config.token.as_bytes());
+                // 网关 token 也可放在 auth_token 里
+                let gw_ok2 = !auth_token.is_empty() && constant_time_eq(auth_token.as_bytes(), state.config.token.as_bytes());
+                if jwt_ok || gw_ok || gw_ok2 {
+                    authenticated = true;
+                    // 记录当前用户（JWT 场景）
+                    if jwt_ok {
+                        if let Some((uid, uname, role)) = verify_jwt(auth_token, &state) {
+                            let mut cu = state.current_user.lock().await;
+                            *cu = Some(User {
+                                id: uid,
+                                username: uname.clone(),
+                                password_hash: String::new(),
+                                display_name: uname,
+                                email: None,
+                                role,
+                                scopes: vec![],
+                                agent_id: "main".to_string(),
+                                enabled: true,
+                                created_at: 0,
+                                last_login: None,
+                                approval_enabled: true,
+                            });
+                        }
+                    }
+                    let resp = json!({"type": "res", "id": id, "ok": true, "payload": {"ok": true, "authenticated": true}});
+                    send_ws_text(&mut stream, &resp.to_string()).await;
+                    continue;
+                } else {
+                    let resp = json!({"type": "res", "id": id, "ok": false, "error": {"code": "AUTH_FAILED", "message": "认证失败：token 无效"}});
+                    send_ws_text(&mut stream, &resp.to_string()).await;
+                    // 认证失败给一次重试机会（前端可能先连后登录）
+                    continue;
+                }
+            }
+
             let result = handle_rpc(state.clone(), method, params).await;
             let response = json!({"type": "res", "id": id, "ok": true, "payload": result});
             send_ws_text(&mut stream, &response.to_string()).await;
         }
     }
+    let _ = auth_deadline;
 }
 
 fn main() {
@@ -15900,7 +16417,7 @@ fn main() {
                     println!("CradleRing 网关启动于 http://{}", addr);
                     println!("WebSocket: ws://{}/ws", addr);
                     println!("数据目录: {}/.cradle-ring", home);
-                    println!("Token: {}", config.token);
+                    println!("Token: {}…（已脱敏，完整 token 见配置文件）", &config.token[..config.token.len().min(4)]);
                     if bind_host == "0.0.0.0" {
                         println!("⚠️  网关已绑定到 0.0.0.0，所有网络接口可访问（请确保防火墙已放行）");
                     }
