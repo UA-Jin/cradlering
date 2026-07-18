@@ -52,10 +52,26 @@
             </a-form-item>
           </a-col>
           <a-col :span="12">
-            <a-form-item label="默认模型" extra="对话使用的模型">
-              <a-select v-model="p.model" allow-create placeholder="选择或输入模型">
-                <a-option v-for="m in providerPreset(p.name)?.models || []" :key="m" :value="m">{{ m }}</a-option>
+            <a-form-item label="默认模型" extra="对话使用的模型，🌐 多模态 / 🧠 思考 / 📝 纯文本">
+              <a-select
+                v-model="p.model"
+                allow-create
+                placeholder="选择或输入模型"
+                @change="onModelChange(p)"
+              >
+                <a-option v-for="m in providerPreset(p.name)?.models || []" :key="m" :value="m">
+                  <span style="display: inline-flex; align-items: center; gap: 8px;">
+                    <span>{{ m }}</span>
+                    <a-tag size="small" :color="modelTag(m).color" style="margin: 0;">{{ modelTag(m).icon }} {{ modelTag(m).label }}</a-tag>
+                    <a-tag v-if="contextLabel(m)" size="small" color="gray" style="margin: 0;">{{ contextLabel(m) }}</a-tag>
+                  </span>
+                </a-option>
               </a-select>
+              <!-- 已选模型的能力标签回显 -->
+              <div v-if="p.model" class="model-cap-hint">
+                <a-tag size="small" :color="modelTag(p.model).color">{{ modelTag(p.model).icon }} {{ modelTag(p.model).label }}</a-tag>
+                <a-tag v-if="contextLabel(p.model)" size="small" color="gray">{{ contextLabel(p.model) }} 上下文</a-tag>
+              </div>
             </a-form-item>
           </a-col>
         </a-row>
@@ -65,11 +81,36 @@
               <a-input v-model="p.baseUrl" placeholder="https://..." />
             </a-form-item>
           </a-col>
-          <a-col :span="12">
-            <a-form-item label="高级选项">
-              <a-space>
-                <a-checkbox v-model="p.supportsThinking">支持深度思考</a-checkbox>
-              </a-space>
+          <a-col :span="6">
+            <a-form-item label="思考等级" extra="仅在原生支持思考的模型上生效">
+              <a-select v-model="p.thinkingLevel" :disabled="!modelSupportsThinking(p)">
+                <a-option v-for="lv in thinkingLevels" :key="lv.value" :value="lv.value">{{ lv.label }}</a-option>
+              </a-select>
+            </a-form-item>
+          </a-col>
+          <a-col :span="6">
+            <a-form-item label="多模态" extra="模型原生能力，自动识别">
+              <a-tag :color="modelCap(p.model).vision ? 'green' : 'gray'">
+                {{ modelCap(p.model).vision ? '支持图像输入' : '仅文本' }}
+              </a-tag>
+            </a-form-item>
+          </a-col>
+        </a-row>
+        <!-- 自定义 Provider：协议类型 + 模型名 -->
+        <a-row v-if="providerPreset(p.name)?.custom" :gutter="16">
+          <a-col :span="8">
+            <a-form-item label="Provider 协议" extra="OpenAI 兼容协议类型">
+              <a-select v-model="p.providerType" allow-create placeholder="openai / anthropic / gemini ...">
+                <a-option value="openai">openai（默认）</a-option>
+                <a-option value="anthropic">anthropic</a-option>
+                <a-option value="gemini">gemini</a-option>
+                <a-option value="ollama">ollama</a-option>
+              </a-select>
+            </a-form-item>
+          </a-col>
+          <a-col :span="16">
+            <a-form-item label="模型名" extra="手动输入 API 文档中的模型 ID">
+              <a-input v-model="p.model" placeholder="例如 gpt-4o 或 glm-4.6" />
             </a-form-item>
           </a-col>
         </a-row>
@@ -230,33 +271,178 @@ const tabs = [
   { key: 'json', label: '高级 JSON', icon: markRaw(IconCode) },
 ];
 
-// ---------- 20 个 Provider 预设（选完自动填充 baseUrl + 模型） ----------
+// ---------- 模型能力元数据（vision / thinking / context，单位 K tokens） ----------
+// models 数组保持纯字符串，能力标签通过此处统一查表，未命中的模型默认当纯文本处理。
+interface ModelCap { vision?: boolean; thinking?: boolean; context?: number }
+const modelCapabilities: Record<string, ModelCap> = {
+  // OpenAI（GPT-4.1 系列 1M；GPT-4o 系列 128K；o 系列 200K 推理）
+  'gpt-4.1': { vision: true, context: 1000 },
+  'gpt-4.1-mini': { vision: true, context: 1000 },
+  'gpt-4.1-nano': { vision: true, context: 1000 },
+  'gpt-4o': { vision: true, context: 128 },
+  'gpt-4o-mini': { vision: true, context: 128 },
+  'o3': { vision: true, thinking: true, context: 200 },
+  'o3-mini': { thinking: true, context: 200 },
+  'o4-mini': { vision: true, thinking: true, context: 200 },
+  // Anthropic Claude（全系列 200K、视觉、扩展思考）
+  'claude-opus-4-5': { vision: true, thinking: true, context: 200 },
+  'claude-sonnet-4-5': { vision: true, thinking: true, context: 200 },
+  'claude-haiku-4-5': { vision: true, thinking: true, context: 200 },
+  'claude-3-5-sonnet-latest': { vision: true, thinking: true, context: 200 },
+  // DeepSeek（V3=chat 1M；R1=reasoner 推理 64K）
+  'deepseek-chat': { context: 1000 },
+  'deepseek-reasoner': { thinking: true, context: 64 },
+  // 通义千问 Qwen3
+  'qwen3-max': { vision: true, thinking: true, context: 256 },
+  'qwen3-plus': { vision: true, thinking: true, context: 256 },
+  'qwen3-turbo': { context: 1000 },
+  'qwen3-coder-plus': { thinking: true, context: 256 },
+  'qwen-max': { context: 32 },
+  'qwen-plus': { context: 128 },
+  'qwen-turbo': { context: 1000 },
+  'qwen-long': { context: 10000 },
+  'qwen-vl-max': { vision: true, context: 32 },
+  'qwen2.5-72b-instruct': { context: 128 },
+  // 智谱 GLM（4.6=200K，4.5=128K，均原生思考）
+  'glm-4.6': { thinking: true, context: 200 },
+  'glm-4.5': { thinking: true, context: 128 },
+  'glm-4.5-air': { thinking: true, context: 128 },
+  'glm-4-plus': { context: 128 },
+  'glm-4-flash': { context: 128 },
+  'glm-4v-plus': { vision: true, context: 128 },
+  // Kimi / 月之暗面
+  'kimi-k2-0905-preview': { context: 128 },
+  'moonshot-v1-8k': { context: 8 },
+  'moonshot-v1-32k': { context: 32 },
+  'moonshot-v1-128k': { context: 128 },
+  // 豆包 / 字节火山方舟
+  'doubao-1-5-pro-32k': { context: 32 },
+  'doubao-1-5-pro-256k': { context: 256 },
+  'doubao-1-5-thinking-pro': { thinking: true, context: 32 },
+  'doubao-1-5-vision-pro': { vision: true, context: 32 },
+  'doubao-seed-1-5-pro': { thinking: true, context: 256 },
+  'doubao-seed-2-0-pro-260215': { thinking: true, context: 256 },
+  // 百度文心 ERNIE
+  'ernie-4.0-8k': { context: 8 },
+  'ernie-4.0-turbo-8k': { context: 8 },
+  'ernie-3.5-8k': { context: 8 },
+  'ernie-speed-8k': { context: 8 },
+  // 讯飞星火
+  'generalv3.5': { context: 8 },
+  'generalv3': { context: 8 },
+  '4.0Ultra': { context: 8 },
+  // MiniMax
+  'MiniMax-Text-01': { context: 1000 },
+  'abab6.5s-chat': { context: 245 },
+  // 阶跃星辰
+  'step-1-8k': { context: 8 },
+  'step-1-32k': { context: 32 },
+  'step-2-16k': { context: 16 },
+  // 腾讯混元
+  'hunyuan-pro': { context: 32 },
+  'hunyuan-standard': { context: 32 },
+  'hunyuan-lite': { context: 256 },
+  // Google Gemini（全系列 1M、视觉、思考）
+  'gemini-2.5-pro': { vision: true, thinking: true, context: 1000 },
+  'gemini-2.5-flash': { vision: true, thinking: true, context: 1000 },
+  'gemini-2.5-flash-lite': { vision: true, thinking: true, context: 1000 },
+  'gemini-2.0-flash': { vision: true, context: 1000 },
+  // Groq（Llama / Gemma 系列，超快推理）
+  'llama-3.3-70b-versatile': { context: 128 },
+  'llama-3.1-8b-instant': { context: 128 },
+  'llama-3.1-70b-versatile': { context: 128 },
+  'llama-3.2-3b-preview': { vision: true, context: 128 },
+  'llama-3.2-1b-preview': { context: 128 },
+  'llama-3.2-11b-vision-preview': { vision: true, context: 128 },
+  'llama-3.2-90b-vision-preview': { vision: true, context: 128 },
+  'deepseek-r1-distill-llama-70b': { thinking: true, context: 128 },
+  'qwen-2.5-32b': { context: 128 },
+  'gemma2-9b-it': { context: 8 },
+  // 硅基流动 SiliconFlow（聚合）
+  'deepseek-ai/DeepSeek-V3': { context: 64 },
+  'deepseek-ai/DeepSeek-R1': { thinking: true, context: 64 },
+  'Qwen/Qwen2.5-72B-Instruct': { context: 128 },
+  'Qwen/Qwen3-32B': { thinking: true, context: 128 },
+  'Qwen/Qwen2.5-7B-Instruct': { context: 128 },
+  'zai-org/GLM-4.6': { thinking: true, context: 200 },
+  'Kimi/Kimi-K2': { context: 128 },
+  'Pro/deepseek-ai/DeepSeek-V3': { context: 64 },
+  // 无问芯穹
+  'llama-3.3-70b-instruct': { context: 128 },
+  'qwen2.5-72b-instruct': { context: 128 },
+  // Ollama 常用本地模型
+  'llama3.3': { context: 128 },
+  'llama3.2': { context: 128 },
+  'qwen2.5': { context: 128 },
+  'qwen2.5-coder': { context: 128 },
+  'qwen3': { thinking: true, context: 128 },
+  'deepseek-r1': { thinking: true, context: 128 },
+  'gemma3': { vision: true, context: 128 },
+  'mistral': { context: 128 },
+  'phi4': { context: 16 },
+  // OpenRouter（透传命名，按上游能力近似）
+  'openai/gpt-4o': { vision: true, context: 128 },
+  'anthropic/claude-sonnet-4.5': { vision: true, thinking: true, context: 200 },
+  'google/gemini-2.0-flash-001': { vision: true, context: 1000 },
+};
+
+// 思考等级选项（无/低/中/高）
+const thinkingLevels = [
+  { value: 'none', label: '无' },
+  { value: 'low', label: '低' },
+  { value: 'medium', label: '中' },
+  { value: 'high', label: '高' },
+];
+
+// 模型能力查询：未登记的模型默认纯文本、上下文未知
+function modelCap(model: string): ModelCap {
+  return modelCapabilities[model] || {};
+}
+// 模型标签：多模态 / 思考 / 纯文本
+function modelTag(model: string): { icon: string; label: string; color: string } {
+  const cap = modelCap(model);
+  if (cap.vision && cap.thinking) return { icon: '🌐🧠', label: '多模态+思考', color: 'arcoblue' };
+  if (cap.vision) return { icon: '🌐', label: '多模态', color: 'green' };
+  if (cap.thinking) return { icon: '🧠', label: '思考', color: 'purple' };
+  return { icon: '📝', label: '纯文本', color: 'gray' };
+}
+// 上下文展示（K → M）
+function contextLabel(model: string): string {
+  const ctx = modelCap(model).context;
+  if (!ctx) return '';
+  return ctx >= 1000 ? `${(ctx / 1000).toFixed(ctx % 1000 === 0 ? 0 : 1)}M` : `${ctx}K`;
+}
+
+// ---------- 20+ Provider 预设（选完自动填充 baseUrl + 模型） ----------
 const providerPresets = [
-  { id: 'openai', label: 'OpenAI', desc: 'GPT-4o 系列', color: 'linear-gradient(135deg, #10a37f, #0d8a6c)', baseUrl: 'https://api.openai.com/v1', models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'o1', 'o3-mini'] },
-  { id: 'anthropic', label: 'Anthropic', desc: 'Claude 系列', color: 'linear-gradient(135deg, #d97757, #c15f3c)', baseUrl: 'https://api.anthropic.com/v1', models: ['claude-sonnet-4-5', 'claude-opus-4-5', 'claude-3-5-sonnet-latest'] },
-  { id: 'deepseek', label: 'DeepSeek', desc: '国产高性价比', color: 'linear-gradient(135deg, #4d6bfe, #3b54d6)', baseUrl: 'https://api.deepseek.com/v1', models: ['deepseek-chat', 'deepseek-reasoner'] },
-  { id: 'qwen', label: '通义千问', desc: '阿里云', color: 'linear-gradient(135deg, #615ced, #4a45c4)', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', models: ['qwen-max', 'qwen-plus', 'qwen-turbo', 'qwen-long'] },
-  { id: 'zhipu', label: '智谱 GLM', desc: 'ChatGLM', color: 'linear-gradient(135deg, #3b6cff, #2b54cc)', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', models: ['glm-4-plus', 'glm-4-flash', 'glm-4-air', 'glm-4-long'] },
-  { id: 'moonshot', label: 'Kimi', desc: '月之暗面长文本', color: 'linear-gradient(135deg, #1f1f1f, #3a3a3a)', baseUrl: 'https://api.moonshot.cn/v1', models: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k', 'kimi-k2-0905-preview'] },
-  { id: 'doubao', label: '豆包', desc: '字节跳动', color: 'linear-gradient(135deg, #3370ff, #1f5ce6)', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', models: ['doubao-pro-32k', 'doubao-lite-32k', 'doubao-1.5-pro-32k'] },
-  { id: 'baidu', label: '文心一言', desc: '百度 ERNIE', color: 'linear-gradient(135deg, #2932e1, #1a21b8)', baseUrl: 'https://qianfan.baidubce.com/v2', models: ['ernie-4.0-8k', 'ernie-3.5-8k', 'ernie-speed-8k'] },
-  { id: 'spark', label: '讯飞星火', desc: '科大讯飞', color: 'linear-gradient(135deg, #2878ff, #1a5fd6)', baseUrl: 'https://spark-api-open.xf-yun.com/v1', models: ['generalv3.5', 'generalv3', '4.0Ultra'] },
+  { id: 'openai', label: 'OpenAI', desc: 'GPT-4.1 / o3 系列', color: 'linear-gradient(135deg, #10a37f, #0d8a6c)', baseUrl: 'https://api.openai.com/v1', models: ['gpt-4.1', 'gpt-4.1-mini', 'gpt-4.1-nano', 'gpt-4o', 'gpt-4o-mini', 'o3', 'o4-mini', 'o3-mini'] },
+  { id: 'anthropic', label: 'Anthropic', desc: 'Claude 4.5 系列', color: 'linear-gradient(135deg, #d97757, #c15f3c)', baseUrl: 'https://api.anthropic.com/v1', models: ['claude-opus-4-5', 'claude-sonnet-4-5', 'claude-haiku-4-5', 'claude-3-5-sonnet-latest'] },
+  { id: 'deepseek', label: 'DeepSeek', desc: 'V3 / R1 国产高性价比', color: 'linear-gradient(135deg, #4d6bfe, #3b54d6)', baseUrl: 'https://api.deepseek.com/v1', models: ['deepseek-chat', 'deepseek-reasoner'] },
+  { id: 'qwen', label: '通义千问', desc: 'Qwen3 阿里云百炼', color: 'linear-gradient(135deg, #615ced, #4a45c4)', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', models: ['qwen3-max', 'qwen3-plus', 'qwen3-turbo', 'qwen3-coder-plus', 'qwen-max', 'qwen-plus', 'qwen-turbo', 'qwen-long', 'qwen-vl-max', 'qwen2.5-72b-instruct'] },
+  { id: 'zhipu', label: '智谱 GLM', desc: 'GLM-4.6 智能体', color: 'linear-gradient(135deg, #3b6cff, #2b54cc)', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', models: ['glm-4.6', 'glm-4.5', 'glm-4.5-air', 'glm-4-plus', 'glm-4-flash', 'glm-4v-plus'] },
+  { id: 'moonshot', label: 'Kimi', desc: 'K2 月之暗面长文本', color: 'linear-gradient(135deg, #1f1f1f, #3a3a3a)', baseUrl: 'https://api.moonshot.cn/v1', models: ['kimi-k2-0905-preview', 'moonshot-v1-128k', 'moonshot-v1-32k', 'moonshot-v1-8k'] },
+  { id: 'doubao', label: '豆包', desc: '1.5/2.0 字节火山方舟', color: 'linear-gradient(135deg, #3370ff, #1f5ce6)', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', models: ['doubao-seed-2-0-pro-260215', 'doubao-seed-1-5-pro', 'doubao-1-5-pro-256k', 'doubao-1-5-pro-32k', 'doubao-1-5-thinking-pro', 'doubao-1-5-vision-pro'] },
+  { id: 'baidu', label: '文心一言', desc: '百度 ERNIE', color: 'linear-gradient(135deg, #2932e1, #1a21b8)', baseUrl: 'https://qianfan.baidubce.com/v2', models: ['ernie-4.0-8k', 'ernie-4.0-turbo-8k', 'ernie-3.5-8k', 'ernie-speed-8k'] },
+  { id: 'spark', label: '讯飞星火', desc: '科大讯飞', color: 'linear-gradient(135deg, #2878ff, #1a5fd6)', baseUrl: 'https://spark-api-open.xf-yun.com/v1', models: ['4.0Ultra', 'generalv3.5', 'generalv3'] },
   { id: 'minimax', label: 'MiniMax', desc: '海螺 AI', color: 'linear-gradient(135deg, #ff6b35, #e05520)', baseUrl: 'https://api.minimax.chat/v1', models: ['MiniMax-Text-01', 'abab6.5s-chat'] },
-  { id: 'stepfun', label: '阶跃星辰', desc: 'Step 系列', color: 'linear-gradient(135deg, #7046cc, #5a36a8)', baseUrl: 'https://api.stepfun.com/v1', models: ['step-1-8k', 'step-1-32k', 'step-2-16k'] },
+  { id: 'stepfun', label: '阶跃星辰', desc: 'Step 系列', color: 'linear-gradient(135deg, #7046cc, #5a36a8)', baseUrl: 'https://api.stepfun.com/v1', models: ['step-2-16k', 'step-1-32k', 'step-1-8k'] },
   { id: 'hunyuan', label: '腾讯混元', desc: 'Hunyuan', color: 'linear-gradient(135deg, #00c8dc, #00a3b8)', baseUrl: 'https://api.hunyuan.cloud.tencent.com/v1', models: ['hunyuan-pro', 'hunyuan-standard', 'hunyuan-lite'] },
   { id: 'sensenova', label: '商汤日日新', desc: 'SenseNova', color: 'linear-gradient(135deg, #00b42a, #009a22)', baseUrl: 'https://api.sensenova.cn/v1', models: ['SenseChat-5', 'SenseChat-Turbo'] },
   { id: 'skywork', label: '天工', desc: 'Skywork', color: 'linear-gradient(135deg, #722ed1, #5a1fb8)', baseUrl: 'https://api.skywork.ai/v1', models: ['skywork-o1-preview'] },
-  { id: 'siliconflow', label: '硅基流动', desc: '聚合平台', color: 'linear-gradient(135deg, #8c57ff, #7046cc)', baseUrl: 'https://api.siliconflow.cn/v1', models: ['Qwen/Qwen2.5-72B-Instruct', 'deepseek-ai/DeepSeek-V3', 'Qwen/Qwen2.5-7B-Instruct'] },
+  { id: 'siliconflow', label: '硅基流动', desc: '聚合 100+ 开源模型', color: 'linear-gradient(135deg, #8c57ff, #7046cc)', baseUrl: 'https://api.siliconflow.cn/v1', models: ['deepseek-ai/DeepSeek-V3', 'deepseek-ai/DeepSeek-R1', 'Qwen/Qwen3-32B', 'Qwen/Qwen2.5-72B-Instruct', 'Qwen/Qwen2.5-7B-Instruct', 'zai-org/GLM-4.6', 'Kimi/Kimi-K2'] },
   { id: 'infinigence', label: '无问芯穹', desc: 'Infinigence', color: 'linear-gradient(135deg, #ff7d00, #e06700)', baseUrl: 'https://cloud.infini-ai.com/maas/v1', models: ['llama-3.3-70b-instruct', 'qwen2.5-72b-instruct'] },
-  { id: 'groq', label: 'Groq', desc: '超快推理', color: 'linear-gradient(135deg, #f55036, #d63d26)', baseUrl: 'https://api.groq.com/openai/v1', models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768'] },
+  { id: 'groq', label: 'Groq', desc: 'Llama 超快推理', color: 'linear-gradient(135deg, #f55036, #d63d26)', baseUrl: 'https://api.groq.com/openai/v1', models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'llama-3.1-70b-versatile', 'llama-3.2-90b-vision-preview', 'llama-3.2-11b-vision-preview', 'deepseek-r1-distill-llama-70b', 'qwen-2.5-32b', 'gemma2-9b-it'] },
   { id: 'openrouter', label: 'OpenRouter', desc: '聚合路由', color: 'linear-gradient(135deg, #6366f1, #4f46e5)', baseUrl: 'https://openrouter.ai/api/v1', models: ['openai/gpt-4o', 'anthropic/claude-sonnet-4.5', 'google/gemini-2.0-flash-001'] },
-  { id: 'gemini', label: 'Gemini', desc: 'Google AI', color: 'linear-gradient(135deg, #1c69d4, #1553ab)', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', models: ['gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash'] },
-  { id: 'ollama', label: 'Ollama', desc: '本地运行', color: 'linear-gradient(135deg, #6d6777, #4d4868)', baseUrl: 'http://127.0.0.1:11434/v1', models: ['llama3.2', 'qwen2.5', 'deepseek-r1', 'mistral'] },
+  { id: 'gemini', label: 'Gemini', desc: 'Google 2.5 系列', color: 'linear-gradient(135deg, #1c69d4, #1553ab)', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', models: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash'] },
+  { id: 'ollama', label: 'Ollama', desc: '本地运行', color: 'linear-gradient(135deg, #6d6777, #4d4868)', baseUrl: 'http://127.0.0.1:11434/v1', models: ['llama3.3', 'llama3.2', 'qwen2.5', 'qwen2.5-coder', 'qwen3', 'deepseek-r1', 'gemma3', 'mistral', 'phi4'] },
+  // 自定义：用户自己填 baseUrl / model / provider type
+  { id: 'custom', label: '自定义', desc: '手动填写端点与模型', color: 'linear-gradient(135deg, #8c8c8c, #595959)', baseUrl: '', models: [] as string[], custom: true },
 ];
 
 interface ProviderForm {
   name: string; apiKey: string; baseUrl: string; model: string;
-  enabled: boolean; supportsThinking: boolean;
+  enabled: boolean; supportsThinking: boolean; thinkingLevel: string;
+  providerType?: string; // 自定义 provider 的 OpenAI 兼容协议类型
   _testing?: boolean; _testResult?: any;
 }
 
@@ -272,7 +458,7 @@ function providerPreset(name: string) {
 }
 
 function addProviderFromPreset(preset: any) {
-  // 已存在则滚动到该卡片，不重复添加
+  // 已存在则提示，不重复添加
   if (formData.providers.some((p) => p.name === preset.id)) {
     Message.info(`${preset.label} 已添加，直接在上方卡片中填写 API Key 即可`);
     return;
@@ -284,8 +470,25 @@ function addProviderFromPreset(preset: any) {
     model: preset.models[0] || '',
     enabled: true,
     supportsThinking: false,
+    thinkingLevel: 'none',
+    providerType: preset.custom ? 'openai' : undefined,
   });
   Message.success(`已添加 ${preset.label}，请填写 API Key 后测试连接`);
+}
+
+// 当前模型是否原生支持思考
+function modelSupportsThinking(p: ProviderForm): boolean {
+  return !!modelCap(p.model).thinking;
+}
+// 当模型切换到支持思考的模型时，自动把思考等级默认设为"中"
+function onModelChange(p: ProviderForm) {
+  if (modelSupportsThinking(p) && p.thinkingLevel === 'none') {
+    p.thinkingLevel = 'medium';
+    p.supportsThinking = true;
+  } else if (!modelSupportsThinking(p)) {
+    p.thinkingLevel = 'none';
+    p.supportsThinking = false;
+  }
 }
 
 async function testProvider(p: ProviderForm) {
@@ -330,6 +533,8 @@ async function loadConfig() {
         model: v.model || providerPreset(k)?.models?.[0] || '',
         enabled: v.enabled !== false,
         supportsThinking: v.supportsThinking || false,
+        thinkingLevel: v.thinkingLevel || (v.supportsThinking ? 'medium' : 'none'),
+        providerType: v.providerType || (providerPreset(k)?.custom ? 'openai' : undefined),
       }));
 
     // gateway
@@ -373,6 +578,8 @@ async function saveAll() {
           model: p.model || undefined,
           enabled: p.enabled,
           supportsThinking: p.supportsThinking || undefined,
+          thinkingLevel: p.thinkingLevel && p.thinkingLevel !== 'none' ? p.thinkingLevel : undefined,
+          ...(p.providerType ? { providerType: p.providerType } : {}),
         };
       }
     }
@@ -545,4 +752,12 @@ onMounted(loadConfig);
 }
 
 .mb-16 { margin-bottom: 16px; }
+
+/* 模型能力标签回显 */
+.model-cap-hint {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
 </style>

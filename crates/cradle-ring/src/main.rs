@@ -8409,6 +8409,15 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
                 "critical": critical_count,
             })
         }
+        // 别名：兼容前端的 ids.ban.list（= security.ids.banned_list）
+        "ids.ban.list" | "ids.banned" => {
+            let entries = state.storage.load_ip_list();
+            let banned: Vec<_> = entries.iter()
+                .filter(|e| e.list_type == "blacklist")
+                .map(|e| json!({ "ip": e.ip, "reason": e.reason, "banned_at": e.created_at }))
+                .collect();
+            json!({ "ips": banned, "count": banned.len() })
+        }
 
         // ====================================================================
         // IP 黑白名单

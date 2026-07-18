@@ -83,6 +83,7 @@ parse_args() {
             --cargo)         INSTALL_METHOD="cargo"; shift ;;
             --git|--github)  INSTALL_METHOD="git"; shift ;;
             --source)        INSTALL_METHOD="source"; shift ;;
+            --gitee)         GITEE_MIRROR=1; shift ;;
             --version)       [[ $# -lt 2 ]] && { ui_error "缺少参数"; exit 2; }; VERSION="$2"; shift 2 ;;
             --prefix)        [[ $# -lt 2 ]] && { ui_error "缺少参数"; exit 2; }; BIN_DIR="$2"; shift 2 ;;
             --home)          [[ $# -lt 2 ]] && { ui_error "缺少参数"; exit 2; }; HOME_DIR="$2"; shift 2 ;;
@@ -99,6 +100,15 @@ parse_args() {
         esac
     done
     [[ -z "$INSTALL_METHOD" ]] && INSTALL_METHOD="cargo"
+    # 镜像源选择（Gitee 对国内更快）
+    if [[ "${GITEE_MIRROR:-0}" == "1" ]]; then
+        REPO_GIT_URL="https://gitee.com/UA-Jin/CradleRing.git"
+        REPO_TARBALL_URL="https://gitee.com/UA-Jin/CradleRing/repository/archive/main.tar.gz"
+        ui_info "使用 Gitee 镜像源"
+    else
+        REPO_GIT_URL="https://github.com/UA-Jin/CradleRing.git"
+        REPO_TARBALL_URL="https://github.com/UA-Jin/CradleRing/archive/refs/heads/main.tar.gz"
+    fi
 }
 
 detect_os_or_die() {
@@ -203,13 +213,13 @@ clone_source() {
         if [[ -d "$tmp_dir/.git" ]]; then
             cd "$tmp_dir" && git fetch --all 2>/dev/null && git checkout main 2>/dev/null || true
         else
-            git clone --depth 1 https://github.com/UA-Jin/CradleRing.git "$tmp_dir" >&2 || { ui_error "克隆失败" >&2; exit 1; }
+            git clone --depth 1 ${REPO_GIT_URL} "$tmp_dir" >&2 || { ui_error "克隆失败" >&2; exit 1; }
         fi
     else
         # fallback：用 curl 下载 tarball（无需 git）
         echo -e "${INFO}git 不可用，改用 curl 下载源码包...${NC}" >&2
         local tarball="$tmp_dir/cradlering.tar.gz"
-        curl -fsSL -o "$tarball" https://github.com/UA-Jin/CradleRing/archive/refs/heads/main.tar.gz >&2 || { ui_error "下载失败" >&2; exit 1; }
+        curl -fsSL -o "$tarball" ${REPO_TARBALL_URL} >&2 || { ui_error "下载失败" >&2; exit 1; }
         tar -xzf "$tarball" -C "$tmp_dir" >&2 || { ui_error "解压失败" >&2; exit 1; }
         # 把解压后的子目录内容移到顶层
         mv "$tmp_dir"/CradleRing-main/* "$tmp_dir/" 2>/dev/null || true
@@ -333,7 +343,7 @@ install_cradle_ring() {
             if [[ -d "$repo_dir/.git" ]]; then
                 cd "$repo_dir"; git fetch --all 2>/dev/null; git checkout "$VERSION" 2>/dev/null || true
             else
-                git clone "https://github.com/UA-Jin/CradleRing.git" "$repo_dir" || { ui_error "克隆失败"; exit 1; }
+                git clone "${REPO_GIT_URL}" "$repo_dir" || { ui_error "克隆失败"; exit 1; }
                 cd "$repo_dir"; git checkout "$VERSION" 2>/dev/null || true
             fi
             cargo build --release --bin cradle-ring || { ui_error "编译失败"; exit 1; }
