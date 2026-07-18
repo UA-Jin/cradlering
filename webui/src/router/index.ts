@@ -11,7 +11,7 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/',
     component: () => import('@/layout/default-layout.vue'),
-    redirect: '/dashboard/overview',
+    redirect: '/dashboard',
     children: [
       // ----- 核心功能 -----
       { path: 'dashboard', name: 'DashboardOverview', component: () => import('@/pages/dashboard/overview.vue'), meta: { label: '仪表盘', icon: 'icon-dashboard', order: 1 } },
@@ -48,7 +48,7 @@ const routes: RouteRecordRaw[] = [
       { path: 'settings', name: 'Settings', component: () => import('@/pages/settings/index.vue'), meta: { label: '设置', icon: 'icon-trophy', order: 32 } },
     ],
   },
-  { path: '/:pathMatch(.*)*', redirect: '/dashboard/overview' },
+  { path: '/:pathMatch(.*)*', redirect: '/dashboard' },
 ];
 
 const router = createRouter({
