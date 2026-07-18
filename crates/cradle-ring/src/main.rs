@@ -1972,6 +1972,11 @@ struct AppState {
     /// 记忆引擎 V3（Cache-First + 向量检索 + 时序知识图谱 + 级联路由）
     /// 使用 OnceCell 实现首次访问时懒加载
     memory_engine: tokio::sync::OnceCell<Arc<MemoryEngine>>,
+    /// 登录限流：username -> (连续失败次数, 锁定截止时间戳 ms)
+    login_attempts: tokio::sync::Mutex<HashMap<String, (u32, i64)>>,
+    /// 运行时配置覆盖层：channels.set 等 RPC 修改配置后立即生效（无需重启）。
+    /// 读取时与 config.raw_json 深度合并（override 优先）。
+    config_override: tokio::sync::RwLock<serde_json::Value>,
 }
 
 impl AppState {
@@ -1988,6 +1993,8 @@ impl AppState {
             channels: Arc::new(ChannelManager::new()),
             current_user: tokio::sync::Mutex::new(None),
             memory_engine: tokio::sync::OnceCell::new(),
+            login_attempts: tokio::sync::Mutex::new(HashMap::new()),
+            config_override: tokio::sync::RwLock::new(serde_json::json!({})),
         });
         state
     }
@@ -2031,17 +2038,31 @@ impl AppState {
 
 impl AppState {
     /// 读取配置中的 channels 节，返回有序 (id, config) 列表
+    /// 合并启动配置 + 运行时覆盖层（override 优先，channels.set 后立即生效）
     fn channels_config(&self) -> Vec<(String, serde_json::Value)> {
-        let mut out = Vec::new();
+        let mut merged: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
         if let Some(obj) = self.config.raw_json.get("channels").and_then(|c| c.as_object()) {
             for (k, v) in obj {
-                out.push((k.clone(), v.clone()));
+                merged.insert(k.clone(), v.clone());
             }
         }
-        out
+        if let Some(obj) = self.config_override.try_read().ok()
+            .and_then(|o| o.get("channels").and_then(|c| c.as_object()).cloned())
+        {
+            for (k, v) in obj {
+                merged.insert(k.clone(), v.clone());
+            }
+        }
+        merged.into_iter().map(|(k, v)| (k, v)).collect()
     }
 
     fn channel_config(&self, name: &str) -> Option<serde_json::Value> {
+        // 优先读运行时覆盖层（channels.set 修改后立即生效），fallback 到启动配置
+        if let Ok(override_cfg) = self.config_override.try_read() {
+            if let Some(cfg) = override_cfg.get("channels").and_then(|c| c.get(name)) {
+                return Some(cfg.clone());
+            }
+        }
         self.config
             .raw_json
             .get("channels")
@@ -2218,6 +2239,18 @@ async fn handle_http(
             send_response(stream, 400, "Bad Request", "application/json", b.as_bytes()).await;
             return;
         }
+        // 登录限流（防暴破）：同一用户名连续失败 5 次锁定 5 分钟
+        {
+            let mut attempts = state.login_attempts.lock().await;
+            let entry = attempts.entry(username.clone()).or_insert((0, 0));
+            let now = current_ms();
+            if entry.1 > now {
+                let wait_secs = (entry.1 - now) / 1000;
+                let b = format!(r#"{{"ok":false,"error":{{"code":"RATE_LIMITED","message":"失败次数过多，请 {} 秒后重试"}}}}"#, wait_secs);
+                send_response(stream, 429, "Too Many Requests", "application/json", b.as_bytes()).await;
+                return;
+            }
+        }
         let mut users = state.storage.load_users();
         let result = match users.iter_mut().find(|u| u.username == username && u.enabled) {
             Some(u) => {
@@ -2229,6 +2262,20 @@ async fn handle_http(
             }
             None => None,
         };
+        // 更新限流计数
+        {
+            let mut attempts = state.login_attempts.lock().await;
+            let entry = attempts.entry(username.clone()).or_insert((0, 0));
+            if result.is_some() {
+                *entry = (0, 0);  // 成功则重置
+            } else {
+                entry.0 += 1;
+                if entry.0 >= 5 {
+                    entry.1 = current_ms() + 5 * 60 * 1000;  // 锁定 5 分钟
+                    entry.0 = 0;
+                }
+            }
+        }
         match result {
             Some(uc) => {
                 state.storage.save_users(&users);
@@ -2286,8 +2333,21 @@ async fn handle_http(
     // ---- 渠道 webhook 回调 ----
     // GET /webhook/{channel}：用于平台验证（WhatsApp 订阅、Slack challenge 等）
     // POST /webhook/{channel}：用于平台事件投递
+    // 安全：支持 /webhook/{channel}/{secret} 路径密钥（防伪造消息注入 agent）
     if path.starts_with("/webhook/") {
-        let channel = path.trim_start_matches("/webhook/").split('?').next().unwrap_or("");
+        let rest = path.trim_start_matches("/webhook/").split('?').next().unwrap_or("");
+        let mut parts = rest.splitn(2, '/');
+        let channel = parts.next().unwrap_or("");
+        let path_secret = parts.next().unwrap_or("");
+        // 路径密钥校验：渠道配置里 webhookSecret 非空时，路径必须匹配（读覆盖层，channels.set 后立即生效）
+        let cfg_secret = state.channel_config(channel)
+            .and_then(|c| c.get("webhookSecret").and_then(|s| s.as_str().map(String::from)))
+            .unwrap_or_default();
+        if !cfg_secret.is_empty() && !constant_time_eq(path_secret.as_bytes(), cfg_secret.as_bytes()) {
+            send_response(stream, 403, "Forbidden", "application/json",
+                br#"{"ok":false,"error":{"code":"FORBIDDEN","message":"webhook secret mismatch"}}"#.as_ref()).await;
+            return;
+        }
         let body = extract_http_body(request);
         handle_webhook(stream, method, channel, path, &body, state.clone()).await;
         return;
@@ -6319,16 +6379,27 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
         // 补充：Channels 扩展
         // ====================================================================
         "channels.list" => {
-            let channels = state.config.raw_json.get("channels").and_then(|c| c.as_object());
-            let mut list = vec![];
-            if let Some(channels) = channels {
+            // 合并启动配置 + 运行时覆盖层（override 优先，channels.set 后立即生效）
+            let mut merged: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+            if let Some(channels) = state.config.raw_json.get("channels").and_then(|c| c.as_object()) {
                 for (id, cfg) in channels {
-                    list.push(json!({
-                        "id": id,
-                        "enabled": cfg["enabled"].as_bool().unwrap_or(false),
-                        "connected": false,
-                    }));
+                    merged.insert(id.clone(), cfg.clone());
                 }
+            }
+            if let Some(channels) = state.config_override.try_read().ok()
+                .and_then(|o| o.get("channels").and_then(|c| c.as_object()).cloned())
+            {
+                for (id, cfg) in channels {
+                    merged.insert(id.clone(), cfg.clone());
+                }
+            }
+            let mut list = vec![];
+            for (id, cfg) in &merged {
+                list.push(json!({
+                    "id": id,
+                    "enabled": cfg["enabled"].as_bool().unwrap_or(false),
+                    "connected": false,
+                }));
             }
             json!({ "channels": list, "count": list.len() })
         }
@@ -6336,8 +6407,67 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
             let id = params["id"].as_str().or(params["type"].as_str()).unwrap_or("custom");
             json!({ "ok": true, "channel": { "id": id, "enabled": true, "connected": false } })
         }
+        "channels.set" => {
+            // 真正保存渠道配置：写配置文件 + 更新运行时覆盖层（立即生效）+ 更新 ChannelManager 启用态
+            let id = params["id"].as_str().unwrap_or("");
+            if id.is_empty() {
+                return json!({ "ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 id"} });
+            }
+            // 获取新配置：params.config 或 params 本身（去掉 id/enabled）
+            let mut new_cfg = params["config"].clone();
+            if !new_cfg.is_object() {
+                new_cfg = json!({});
+            }
+            // enabled 状态：params.enabled 优先，否则 config.enabled，否则 true
+            let enabled = params["enabled"].as_bool()
+                .or_else(|| new_cfg["enabled"].as_bool())
+                .unwrap_or(true);
+            new_cfg["enabled"] = json!(enabled);
+
+            // 1. 更新运行时覆盖层（立即生效，channel_config 优先读这里）
+            {
+                let mut override_cfg = state.config_override.write().await;
+                if !override_cfg.is_object() { *override_cfg = json!({}); }
+                if override_cfg.get("channels").is_none() { override_cfg["channels"] = json!({}); }
+                override_cfg["channels"][id] = new_cfg.clone();
+            }
+
+            // 2. 写配置文件（持久化，重启后仍在）
+            let cfg_path = format!("{}/.cradle-ring/cradle-ring.json", state.storage.home);
+            let mut current: serde_json::Value = std::fs::read_to_string(&cfg_path)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or(json!({}));
+            if current.get("channels").is_none() { current["channels"] = json!({}); }
+            current["channels"][id] = new_cfg.clone();
+            if let Err(e) = std::fs::write(&cfg_path, serde_json::to_string_pretty(&current).unwrap_or_default()) {
+                return json!({ "ok": false, "error": format!("写配置失败: {}", e) });
+            }
+
+            // 3. 更新 ChannelManager 启用态（渠道后台任务立即感知）
+            state.channels.set_enabled(id, enabled).await;
+
+            json!({ "ok": true, "channel": { "id": id, "enabled": enabled }, "saved": true, "effective": true })
+        }
         "channels.delete" => {
             let id = params["id"].as_str().unwrap_or("");
+            // 从覆盖层和配置文件都删除
+            {
+                let mut override_cfg = state.config_override.write().await;
+                if let Some(channels) = override_cfg.get_mut("channels").and_then(|c| c.as_object_mut()) {
+                    channels.remove(id);
+                }
+            }
+            let cfg_path = format!("{}/.cradle-ring/cradle-ring.json", state.storage.home);
+            if let Ok(s) = std::fs::read_to_string(&cfg_path) {
+                if let Ok(mut current) = serde_json::from_str::<serde_json::Value>(&s) {
+                    if let Some(channels) = current.get_mut("channels").and_then(|c| c.as_object_mut()) {
+                        channels.remove(id);
+                        let _ = std::fs::write(&cfg_path, serde_json::to_string_pretty(&current).unwrap_or_default());
+                    }
+                }
+            }
+            state.channels.set_enabled(id, false).await;
             json!({ "ok": true, "channel": id, "deleted": true })
         }
         "channels.test" => {
@@ -6346,12 +6476,11 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
             let id = params["id"].as_str().unwrap_or("");
             // 支持两种模式：
             // 1. 传入 config（测试未保存的配置）：params.config
-            // 2. 只传 id（测试已保存的配置）
+            // 2. 只传 id（测试已保存的配置，读覆盖层优先）
             let cfg = if params["config"].is_object() {
                 params["config"].clone()
             } else {
-                let channels = state.config.raw_json.get("channels").and_then(|c| c.as_object()).cloned();
-                channels.and_then(|m| m.get(id).cloned()).unwrap_or(json!({}))
+                state.channel_config(id).unwrap_or(json!({}))
             };
             let result = test_channel_connection(id, &cfg).await;
             match result {
@@ -6669,6 +6798,62 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
                 "commitDate": build_date(),
                 "dirty": build_dirty(),
                 "uptimeMs": current_ms() - state.started_at,
+            })
+        }
+
+        // 主机监控聚合（1Panel 风格：CPU/内存/磁盘/负载/网络 IO，真实读 /proc）
+        "host.stats" => {
+            // CPU：/proc/stat 采样两次算使用率（间隔 100ms）
+            let cpu_usage = sample_cpu_usage().await;
+            let cpu_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+
+            // 内存：/proc/meminfo
+            let (mem_total, mem_used, mem_available) = read_meminfo();
+
+            // 负载：/proc/loadavg
+            let (load1, load5, load15) = std::fs::read_to_string("/proc/loadavg").ok()
+                .and_then(|s| {
+                    let parts: Vec<&str> = s.split_whitespace().collect();
+                    if parts.len() >= 3 {
+                        Some((parts[0].parse().unwrap_or(0.0), parts[1].parse().unwrap_or(0.0), parts[2].parse().unwrap_or(0.0)))
+                    } else { None }
+                })
+                .unwrap_or((0.0, 0.0, 0.0));
+
+            // 磁盘：df -k /（根分区 + 常见挂载点）
+            let disks = read_disk_usage().await;
+
+            // 网络 IO：/proc/net/dev（采样两次算速率）
+            let (net_rx_kbps, net_tx_kbps) = sample_net_io().await;
+
+            // 主机名/系统/内核
+            let hostname = std::fs::read_to_string("/etc/hostname").ok().map(|s| s.trim().to_string()).unwrap_or_default();
+            let kernel = std::fs::read_to_string("/proc/version").ok()
+                .and_then(|s| s.split_whitespace().nth(2).map(|v| v.to_string()))
+                .unwrap_or_default();
+            let os = std::fs::read_to_string("/etc/os-release").ok()
+                .and_then(|s| s.lines().find(|l| l.starts_with("PRETTY_NAME=")).map(|l| l.trim_start_matches("PRETTY_NAME=").trim_matches('"').to_string()))
+                .unwrap_or_else(|| "Linux".to_string());
+
+            json!({
+                "hostname": hostname,
+                "os": os,
+                "kernel": kernel,
+                "cpu": {
+                    "usage": cpu_usage,
+                    "cores": cpu_cores,
+                },
+                "memory": {
+                    "totalMb": mem_total,
+                    "usedMb": mem_used,
+                    "availableMb": mem_available,
+                    "usagePct": if mem_total > 0 { (mem_used as f64 / mem_total as f64 * 100.0 * 10.0).round() / 10.0 } else { 0.0 },
+                },
+                "load": { "load1": load1, "load5": load5, "load15": load15 },
+                "disks": disks,
+                "network": { "rxKbps": net_rx_kbps, "txKbps": net_tx_kbps },
+                "uptimeMs": current_ms() - state.started_at,
+                "ts": current_ms(),
             })
         }
 
@@ -16680,6 +16865,127 @@ async fn test_channel_connection(id: &str, cfg: &serde_json::Value) -> Result<St
     }
 }
 
+// ============================================================================
+// 主机监控辅助（1Panel 风格，真实读 /proc）
+// ============================================================================
+
+/// 读 /proc/stat 的 CPU 时间片（user, nice, system, idle, iowait, irq, softirq）
+fn read_cpu_times() -> Option<(u64, u64)> {
+    let s = std::fs::read_to_string("/proc/stat").ok()?;
+    let line = s.lines().next()?;
+    let parts: Vec<u64> = line.split_whitespace().skip(1)
+        .filter_map(|p| p.parse().ok()).collect();
+    if parts.len() < 4 { return None; }
+    let idle = parts[3] + parts.get(4).copied().unwrap_or(0);  // idle + iowait
+    let total: u64 = parts.iter().sum();
+    Some((total, idle))
+}
+
+/// 采样 CPU 使用率（间隔 100ms 两次采样）
+async fn sample_cpu_usage() -> f64 {
+    let t1 = read_cpu_times();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let t2 = read_cpu_times();
+    match (t1, t2) {
+        (Some((total1, idle1)), Some((total2, idle2))) => {
+            let dt = total2.saturating_sub(total1) as f64;
+            let di = idle2.saturating_sub(idle1) as f64;
+            if dt > 0.0 { ((dt - di) / dt * 100.0 * 10.0).round() / 10.0 } else { 0.0 }
+        }
+        _ => 0.0,
+    }
+}
+
+/// 读 /proc/meminfo：返回 (total_mb, used_mb, available_mb)
+fn read_meminfo() -> (u64, u64, u64) {
+    let s = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+    let mut total = 0u64;
+    let mut available = 0u64;
+    let mut free = 0u64;
+    let mut buffers = 0u64;
+    let mut cached = 0u64;
+    for line in s.lines() {
+        let mut parts = line.split_whitespace();
+        let key = parts.next().unwrap_or("");
+        let val: u64 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0) / 1024;  // kB → MB
+        match key {
+            "MemTotal:" => total = val,
+            "MemAvailable:" => available = val,
+            "MemFree:" => free = val,
+            "Buffers:" => buffers = val,
+            "Cached:" => cached = val,
+            _ => {}
+        }
+    }
+    let used = if available > 0 { total.saturating_sub(available) } else { total.saturating_sub(free + buffers + cached) };
+    (total, used, available)
+}
+
+/// 读磁盘使用（df -k，根分区 + 常见挂载点，去重 tmpfs/devtmpfs）
+async fn read_disk_usage() -> Vec<serde_json::Value> {
+    let output = tokio::process::Command::new("df")
+        .args(["-k", "--output=target,size,used,avail,pcent"])
+        .output().await
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    let mut disks = vec![];
+    // 跳过的虚拟挂载点（tmpfs/devtmpfs/overlay 系统路径）
+    let skip_mounts = ["/dev", "/dev/shm", "/run", "/sys", "/proc", "/boot", "/snap", "/run/user", "/dev/pts", "/sys/fs/cgroup"];
+    for line in output.lines().skip(1) {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 5 { continue; }
+        let mount = parts[0];
+        // 跳过虚拟文件系统挂载点
+        if skip_mounts.iter().any(|s| mount == *s || mount.starts_with(&format!("{}/", s))) { continue; }
+        // 只保留真实挂载点（根、/home、/data、/var、/mnt、/media 等）
+        if !(mount == "/" || mount.starts_with("/home") || mount.starts_with("/data") || mount.starts_with("/var") || mount.starts_with("/mnt") || mount.starts_with("/media") || mount.starts_with("/opt")) {
+            continue;
+        }
+        let total_kb: u64 = parts[1].parse().unwrap_or(0);
+        let used_kb: u64 = parts[2].parse().unwrap_or(0);
+        let avail_kb: u64 = parts[3].parse().unwrap_or(0);
+        if total_kb == 0 { continue; }
+        // 避免重复挂载点
+        if disks.iter().any(|d: &serde_json::Value| d["mount"].as_str() == Some(mount)) { continue; }
+        disks.push(json!({
+            "mount": mount,
+            "totalGb": (total_kb as f64 / 1024.0 / 1024.0 * 10.0).round() / 10.0,
+            "usedGb": (used_kb as f64 / 1024.0 / 1024.0 * 10.0).round() / 10.0,
+            "availGb": (avail_kb as f64 / 1024.0 / 1024.0 * 10.0).round() / 10.0,
+            "usagePct": (used_kb as f64 / total_kb as f64 * 100.0 * 10.0).round() / 10.0,
+        }));
+    }
+    // 只保留前 5 个
+    disks.truncate(5);
+    disks
+}
+
+/// 读 /proc/net/dev 的网络字节总量（排除 lo）
+fn read_net_bytes() -> (u64, u64) {
+    let s = std::fs::read_to_string("/proc/net/dev").unwrap_or_default();
+    let mut rx = 0u64;
+    let mut tx = 0u64;
+    for line in s.lines().skip(2) {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 17 { continue; }
+        let iface = parts[0].trim_end_matches(':');
+        if iface == "lo" { continue; }
+        rx += parts[1].parse::<u64>().unwrap_or(0);
+        tx += parts[9].parse::<u64>().unwrap_or(0);
+    }
+    (rx, tx)
+}
+
+/// 采样网络 IO 速率（KB/s，间隔 500ms）
+async fn sample_net_io() -> (f64, f64) {
+    let (rx1, tx1) = read_net_bytes();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let (rx2, tx2) = read_net_bytes();
+    let rx_kbps = rx2.saturating_sub(rx1) as f64 / 1024.0 * 2.0;  // 500ms → 每秒
+    let tx_kbps = tx2.saturating_sub(tx1) as f64 / 1024.0 * 2.0;
+    ((rx_kbps * 10.0).round() / 10.0, (tx_kbps * 10.0).round() / 10.0)
+}
+
 /// Cron 调度器后台循环
 async fn cron_scheduler_loop(state: Arc<AppState>) {
     loop {
@@ -16928,10 +17234,16 @@ fn main() {
                         let st = state.clone();
                         tokio::spawn(async move {
                             let mut stream = stream;
-                            // 读 HTTP 请求头
+                            // 读 HTTP 请求头（修复：加 10s 读取超时，防 slowloris 慢连接耗尽 task）
                             use tokio::io::AsyncReadExt;
                             let mut buf = vec![0u8; 16384];
-                            let n = stream.read(&mut buf).await.unwrap_or(0);
+                            let n = match tokio::time::timeout(
+                                std::time::Duration::from_secs(10),
+                                stream.read(&mut buf),
+                            ).await {
+                                Ok(Ok(n)) => n,
+                                Ok(Err(_)) | Err(_) => return,
+                            };
                             if n == 0 { return; }
                             let request = String::from_utf8_lossy(&buf[..n]).to_string();
                             if request.contains("Upgrade: websocket") || request.contains("upgrade: websocket") {

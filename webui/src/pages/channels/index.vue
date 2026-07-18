@@ -47,6 +47,15 @@
           <div class="hint">将此 URL 配置到 {{ current.label }} 的回调设置中</div>
         </a-form-item>
 
+        <!-- Webhook 密钥（防伪造消息注入，可选但推荐） -->
+        <a-form-item label="Webhook 密钥（防伪造）">
+          <a-space>
+            <a-input-password v-model="current.config.webhookSecret" placeholder="留空则不校验（不推荐）" allow-clear style="flex: 1" />
+            <a-button @click="genSecret"><template #icon><icon-refresh /></template>生成</a-button>
+          </a-space>
+          <div class="hint">配置后回调 URL 会带上该密钥，不知道密钥的人无法伪造消息注入到 Agent。修改后需重新复制上方 URL</div>
+        </a-form-item>
+
         <!-- 渠道专属字段 -->
         <a-divider>连接配置</a-divider>
         <template v-for="field in current.fields" :key="field.key">
@@ -193,7 +202,9 @@ const testResult = ref<{ ok: boolean; message: string } | null>(null);
 const webhookUrl = computed(() => {
   if (!current.value) return '';
   const base = window.location.origin;
-  return `${base}/webhook/${current.value.id}`;
+  const secret = current.value.config?.webhookSecret;
+  // 配置了密钥则带在路径里（防伪造消息注入）
+  return secret ? `${base}/webhook/${current.value.id}/${secret}` : `${base}/webhook/${current.value.id}`;
 });
 
 function statusText(ch: Channel) {
@@ -300,6 +311,16 @@ function copyWebhook() {
   navigator.clipboard.writeText(webhookUrl.value).then(() => {
     Message.success('已复制到剪贴板');
   });
+}
+
+function genSecret() {
+  if (!current.value) return;
+  // 生成 32 位随机密钥（URL 安全字符）
+  const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  const arr = new Uint8Array(24);
+  crypto.getRandomValues(arr);
+  current.value.config.webhookSecret = Array.from(arr).map((b) => chars[b % chars.length]).join('');
+  Message.success('已生成新密钥，请保存配置并重新复制 Webhook URL');
 }
 
 onMounted(load);

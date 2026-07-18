@@ -59,6 +59,48 @@
       </div>
     </div>
 
+    <!-- 主机监控行（1Panel 风格：CPU/内存/磁盘/负载/网络 IO 仪表） -->
+    <div class="host-stats-row" v-if="hostStats">
+      <div class="host-card">
+        <div class="host-card-title">CPU 使用率</div>
+        <a-progress type="circle" :percent="hostStats.cpu.usage / 100" :stroke-width="8" :color="usageColor(hostStats.cpu.usage)">
+          <template #text>{{ hostStats.cpu.usage }}%</template>
+        </a-progress>
+        <div class="host-card-sub">{{ hostStats.cpu.cores }} 核 · 负载 {{ hostStats.load.load1 }}</div>
+      </div>
+      <div class="host-card">
+        <div class="host-card-title">内存</div>
+        <a-progress type="circle" :percent="hostStats.memory.usagePct / 100" :stroke-width="8" :color="usageColor(hostStats.memory.usagePct)">
+          <template #text>{{ hostStats.memory.usagePct }}%</template>
+        </a-progress>
+        <div class="host-card-sub">{{ formatMb(hostStats.memory.usedMb) }} / {{ formatMb(hostStats.memory.totalMb) }}</div>
+      </div>
+      <div class="host-card">
+        <div class="host-card-title">磁盘（{{ hostStats.disks[0]?.mount || '/' }}）</div>
+        <a-progress type="circle" :percent="(hostStats.disks[0]?.usagePct || 0) / 100" :stroke-width="8" :color="usageColor(hostStats.disks[0]?.usagePct || 0)">
+          <template #text>{{ hostStats.disks[0]?.usagePct || 0 }}%</template>
+        </a-progress>
+        <div class="host-card-sub">{{ hostStats.disks[0]?.usedGb || 0 }}G / {{ hostStats.disks[0]?.totalGb || 0 }}G</div>
+      </div>
+      <div class="host-card">
+        <div class="host-card-title">系统负载</div>
+        <div class="load-values">
+          <div class="load-item"><span class="load-num">{{ hostStats.load.load1 }}</span><span class="load-label">1分钟</span></div>
+          <div class="load-item"><span class="load-num">{{ hostStats.load.load5 }}</span><span class="load-label">5分钟</span></div>
+          <div class="load-item"><span class="load-num">{{ hostStats.load.load15 }}</span><span class="load-label">15分钟</span></div>
+        </div>
+        <div class="host-card-sub">{{ hostStats.hostname }} · {{ hostStats.os }}</div>
+      </div>
+      <div class="host-card">
+        <div class="host-card-title">网络 IO</div>
+        <div class="net-io">
+          <div class="net-item rx"><icon-arrow-down /> {{ hostStats.network.rxKbps }} KB/s</div>
+          <div class="net-item tx"><icon-arrow-up /> {{ hostStats.network.txKbps }} KB/s</div>
+        </div>
+        <div class="host-card-sub">内核 {{ hostStats.kernel }}</div>
+      </div>
+    </div>
+
     <!-- 图表区域 -->
     <div class="charts-row">
       <a-card class="chart-card" title="设备分布" :bordered="false">
@@ -261,7 +303,7 @@ const mapOption = computed(() => ({
     min: 0, max: 100,
     text: ['高风险', '低风险'],
     inRange: { color: ['#56ca00', '#ffb400', '#ff4c51'] },
-    textStyle: { color: appStore.isDark ? '#c9cdd4' : '#433c50' },
+    textStyle: { color: appStore.isDark ? '#c0bec5' : '#433c50' },
   },
   series: [{
     type: 'scatter',
@@ -277,7 +319,7 @@ const mapOption = computed(() => ({
     map: 'world',
     roam: true,
     label: { show: false },
-    itemStyle: { areaColor: appStore.isDark ? '#232324' : '#f2f3f5', borderColor: appStore.isDark ? '#333' : '#ddd' },
+    itemStyle: { areaColor: appStore.isDark ? '#403c5a' : '#f2f0f5', borderColor: appStore.isDark ? '#333' : '#ddd' },
   },
 }));
 
@@ -312,6 +354,28 @@ const riskRankOption = computed(() => {
   };
 });
 
+// 主机监控（1Panel 风格，host.stats RPC 真实读 /proc）
+const hostStats = ref<any>(null);
+
+async function loadHostStats() {
+  try {
+    hostStats.value = await rpc.call<any>('host.stats');
+  } catch (e) {
+    // 首次可能失败
+  }
+}
+
+function usageColor(pct: number): string {
+  if (pct >= 90) return '#ff4c51';
+  if (pct >= 70) return '#ffb400';
+  return '#8c57ff';
+}
+
+function formatMb(mb: number): string {
+  if (mb >= 1024) return `${(mb / 1024).toFixed(1)}G`;
+  return `${mb}M`;
+}
+
 async function refresh() {
   loading.value = true;
   try {
@@ -343,12 +407,16 @@ function toggleFullscreen() {
 }
 
 let timer: any = null;
+let hostTimer: any = null;
 onMounted(() => {
   refresh();
+  loadHostStats();
   timer = setInterval(refresh, 30000); // 30s 自动刷新
+  hostTimer = setInterval(loadHostStats, 5000); // 主机监控 5s 刷新
 });
 onUnmounted(() => {
   if (timer) clearInterval(timer);
+  if (hostTimer) clearInterval(hostTimer);
 });
 </script>
 
@@ -358,7 +426,84 @@ onUnmounted(() => {
   background: var(--color-bg-2);
   padding: 16px 20px;
   &.dark-mode {
-    background: #0d1117;
+    background: #28243d;
+  }
+}
+
+/* 主机监控行（1Panel 风格） */
+.host-stats-row {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 16px;
+  margin-bottom: 20px;
+  @media (max-width: 1200px) { grid-template-columns: repeat(3, 1fr); }
+  @media (max-width: 768px) { grid-template-columns: repeat(2, 1fr); }
+}
+.host-card {
+  background: var(--color-bg-1);
+  border-radius: var(--card-radius);
+  box-shadow: var(--card-shadow);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  transition: box-shadow 0.2s;
+  &:hover { box-shadow: var(--card-shadow-hover); }
+  .host-card-title {
+    font-size: 13px;
+    color: var(--color-text-3);
+    margin-bottom: 12px;
+    align-self: flex-start;
+  }
+  .host-card-sub {
+    font-size: 11px;
+    color: var(--color-text-4);
+    margin-top: 10px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+  }
+}
+.load-values {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  .load-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  .load-num {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--brand-primary);
+    line-height: 1.2;
+  }
+  .load-label {
+    font-size: 11px;
+    color: var(--color-text-4);
+    margin-top: 2px;
+  }
+}
+.net-io {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+  justify-content: center;
+  .net-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 16px;
+    font-weight: 600;
+    &.rx { color: var(--brand-success); }
+    &.tx { color: var(--brand-info); }
+    svg { font-size: 15px; }
   }
 }
 
