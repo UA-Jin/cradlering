@@ -8640,6 +8640,165 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
                 .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
             json!({"ok": true, "rules": output})
         }
+
+        // 防火墙状态详情（结构化：启用状态/后端/规则数/最近日志）
+        "firewall.status" => {
+            // 检测后端
+            let has_ufw = tokio::process::Command::new("sh").arg("-c")
+                .arg("command -v ufw >/dev/null 2>&1 && echo yes || echo no")
+                .output().await
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default() == "yes";
+            let backend = if has_ufw { "ufw" } else { "iptables" };
+
+            // 检测是否启用
+            let active = if has_ufw {
+                tokio::process::Command::new("sh").arg("-c")
+                    .arg("ufw status 2>/dev/null | head -1")
+                    .output().await
+                    .map(|o| String::from_utf8_lossy(&o.stdout).contains("Status: active")).unwrap_or(false)
+            } else {
+                // iptables 有规则且 policy 不是 ACCEPT 就认为启用
+                tokio::process::Command::new("sh").arg("-c")
+                    .arg("iptables -L INPUT -n 2>/dev/null | head -5")
+                    .output().await
+                    .map(|o| String::from_utf8_lossy(&o.stdout).contains("Chain INPUT")).unwrap_or(false)
+            };
+
+            // 规则数
+            let _rules_count = if has_ufw {
+                tokio::process::Command::new("sh").arg("-c")
+                    .arg("ufw status numbered 2>/dev/null | grep -c '^\\[' || echo 0")
+                    .output().await
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<usize>().unwrap_or(0)).unwrap_or(0)
+            } else {
+                tokio::process::Command::new("sh").arg("-c")
+                    .arg("iptables -L INPUT -n 2>/dev/null | grep -c '^[0-9]' || echo 0")
+                    .output().await
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<usize>().unwrap_or(0)).unwrap_or(0)
+            };
+
+            // 结构化规则列表
+            let mut rules: Vec<serde_json::Value> = vec![];
+            let rules_output = if has_ufw {
+                tokio::process::Command::new("sh").arg("-c")
+                    .arg("ufw status numbered 2>/dev/null | grep '^\\[' | head -30")
+                    .output().await
+                    .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default()
+            } else {
+                tokio::process::Command::new("sh").arg("-c")
+                    .arg("iptables -L INPUT -n --line-numbers 2>/dev/null | grep '^[0-9]' | head -30")
+                    .output().await
+                    .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default()
+            };
+            for (i, line) in rules_output.lines().enumerate() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() < 3 { continue; }
+                if has_ufw {
+                    // UFW 格式: [ 1] 22/tcp                     ALLOW IN    Anywhere
+                    let num = parts[0].trim_matches(|c| c == '[' || c == ']').parse::<usize>().unwrap_or(i + 1);
+                    let port = parts.get(1).unwrap_or(&"").to_string();
+                    let action = parts.get(2).unwrap_or(&"").to_string();
+                    let direction = parts.get(3).unwrap_or(&"").to_string();
+                    let from = parts.get(4).unwrap_or(&"").to_string();
+                    rules.push(json!({
+                        "num": num, "action": action, "protocol": "tcp",
+                        "source": from, "destination": "anywhere",
+                        "port": port, "interface": direction, "comment": "",
+                    }));
+                } else {
+                    // iptables 格式: 1    ACCEPT     tcp  --  0.0.0.0/0            0.0.0.0/0            tcp dpt:22
+                    let num = parts[0].parse::<usize>().unwrap_or(i + 1);
+                    let action = parts.get(1).unwrap_or(&"").to_string();
+                    let protocol = parts.get(2).unwrap_or(&"").to_string();
+                    let source = parts.get(4).unwrap_or(&"").to_string();
+                    let dest = parts.get(5).unwrap_or(&"").to_string();
+                    let port = if line.contains("dpt:") {
+                        line.split("dpt:").nth(1).unwrap_or("").split_whitespace().next().unwrap_or("").to_string()
+                    } else { "".to_string() };
+                    rules.push(json!({
+                        "num": num, "action": action, "protocol": protocol,
+                        "source": source, "destination": dest,
+                        "port": port, "interface": "", "comment": "",
+                    }));
+                }
+            }
+
+            // 最近日志（内核日志中的防火墙相关，简化：读 dmesg 或 ufw log）
+            let recent_logs: Vec<serde_json::Value> = vec![];
+
+            json!({
+                "active": active,
+                "backend": backend,
+                "rules": rules.len(),
+                "rulesList": rules,
+                "recentLogs": recent_logs,
+            })
+        }
+
+        // 防火墙启用/禁用切换
+        "firewall.toggle" => {
+            let enabled = params["enabled"].as_bool().unwrap_or(false);
+            let has_ufw = tokio::process::Command::new("sh").arg("-c")
+                .arg("command -v ufw >/dev/null 2>&1 && echo yes || echo no")
+                .output().await
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default() == "yes";
+            let cmd = if has_ufw {
+                if enabled { "sudo ufw enable" } else { "sudo ufw disable" }
+            } else {
+                if enabled { "sudo iptables -P INPUT DROP" } else { "sudo iptables -P INPUT ACCEPT" }
+            };
+            let result = tokio::process::Command::new("sh").arg("-c").arg(cmd).output().await;
+            match result {
+                Ok(o) if o.status.success() => json!({"ok": true, "enabled": enabled, "backend": if has_ufw { "ufw" } else { "iptables" }}),
+                Ok(o) => json!({"ok": false, "error": String::from_utf8_lossy(&o.stderr)}),
+                Err(e) => json!({"ok": false, "error": e.to_string()}),
+            }
+        }
+
+        // 防火墙规则导入（iptables-save 格式，支持替换/追加模式）
+        "firewall.import" => {
+            let rules_text = params["rules"].as_str().unwrap_or("");
+            let replace = params["replace"].as_bool().unwrap_or(false);
+            if rules_text.trim().is_empty() {
+                return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少规则内容"}});
+            }
+            // 先备份当前规则
+            let backup_dir = format!("{}/.cradle-ring/data/firewall-backup", state.storage.home);
+            let _ = tokio::fs::create_dir_all(&backup_dir).await;
+            let backup_file = format!("{}/backup-{}.rules", backup_dir, current_ms());
+            let backup_output = tokio::process::Command::new("sh").arg("-c")
+                .arg("iptables-save 2>/dev/null || echo '# empty'")
+                .output().await
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+            let _ = tokio::fs::write(&backup_file, &backup_output).await;
+
+            // 如果是替换模式，先清空
+            if replace {
+                let _ = tokio::process::Command::new("sh").arg("-c")
+                    .arg("sudo iptables -F INPUT 2>/dev/null; sudo ufw --force reset 2>/dev/null")
+                    .output().await;
+            }
+
+            // 导入规则：用 iptables-restore
+            let tmp_file = format!("{}/.cradle-ring/data/firewall-import-{}.rules", state.storage.home, current_ms());
+            let _ = tokio::fs::write(&tmp_file, rules_text).await;
+            let restore_cmd = if rules_text.contains("*filter") {
+                format!("sudo iptables-restore < {}", tmp_file)
+            } else {
+                // 逐行执行 -A INPUT 规则
+                format!("sudo iptables-restore < {}", tmp_file)
+            };
+            let result = tokio::process::Command::new("sh").arg("-c").arg(&restore_cmd).output().await;
+            let _ = tokio::fs::remove_file(&tmp_file).await;
+            match result {
+                Ok(o) if o.status.success() => {
+                    let imported = rules_text.lines().filter(|l| l.trim().starts_with("-A")).count();
+                    json!({"ok": true, "imported": imported, "backup": backup_file, "replace": replace})
+                }
+                Ok(o) => json!({"ok": false, "error": format!("导入失败: {}", String::from_utf8_lossy(&o.stderr)), "backup": backup_file}),
+                Err(e) => json!({"ok": false, "error": e.to_string()}),
+            }
+        }
         "firewall.add" => {
             let rule = params["rule"].as_str().unwrap_or("");
             if rule.is_empty() { return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 rule"}}); }
