@@ -351,7 +351,9 @@ build_webui() {
     fi
     local webui_dir="$src_dir/webui"
     if [[ ! -d "$webui_dir" ]] || [[ ! -f "$webui_dir/package.json" ]]; then
-        ui_warn "未找到 webui/ 目录，跳过前端构建（将使用已有 ui-dist）"
+        ui_warn "未找到 webui/ 目录，跳过前端构建"
+        ui_warn "⚠️  这会导致网关页面 404！请确保后续能从其他位置部署 ui-dist"
+        ui_info "如需手动构建：cd $src_dir/webui && pnpm install && pnpm build"
         return 0
     fi
     ui_step "构建前端（Vue3 + Arco Design Pro）..."
@@ -400,16 +402,32 @@ install_binary_and_ui() {
         [[ "$DRY_RUN" != "1" ]] && { cp "$BINARY" "$BIN_DIR/cradle-ring"; chmod +x "$BIN_DIR/cradle-ring"; }
         ui_success "二进制: $BIN_DIR/cradle-ring"
     }
-    local local_ui="$SCRIPT_DIR/crates/cradle-ring/ui-dist"
-    local webui_dist="$SCRIPT_DIR/webui/dist"
+    # 关键：与 build_webui 一致地解析源码目录（curl|bash 模式下 SRC_DIR 是 clone 的临时目录）
+    local src_for_ui="${SRC_DIR:-$SCRIPT_DIR}"
+    local local_ui="$src_for_ui/crates/cradle-ring/ui-dist"
+    local webui_dist="$src_for_ui/webui/dist"
+    local ui_installed=0
     if [[ -d "$webui_dist/assets" ]]; then
         ui_step "安装 UI（Vue3 + Arco Design Pro）..."
         [[ "$DRY_RUN" != "1" ]] && { rm -rf "$BIN_DIR/ui-dist"; cp -r "$webui_dist" "$BIN_DIR/ui-dist"; }
-        ui_success "UI 文件已安装（Arco Design Pro）"
+        ui_installed=1
     elif [[ -d "$local_ui/assets" ]]; then
         ui_step "安装 UI..."
-        [[ "$DRY_RUN" != "1" ]] && cp -r "$local_ui"/* "$BIN_DIR/ui-dist/" 2>/dev/null || true
-        ui_success "UI 文件已安装"
+        [[ "$DRY_RUN" != "1" ]] && cp -r "$local_ui"/* "$BIN_DIR/ui-dist/"
+        ui_installed=1
+    fi
+    # 最终校验：确保 index.html 真实存在，否则网关会 404
+    if [[ "$DRY_RUN" != "1" ]]; then
+        if [[ ! -f "$BIN_DIR/ui-dist/index.html" ]]; then
+            ui_error "UI 部署失败：$BIN_DIR/ui-dist/index.html 不存在"
+            ui_error "网关启动后页面会 404！请手动构建前端："
+            ui_info "  cd $src_for_ui/webui && pnpm install && pnpm build"
+            ui_info "  cp -r $src_for_ui/webui/dist/* $BIN_DIR/ui-dist/"
+            return 1
+        fi
+        if [[ "$ui_installed" == "1" ]]; then
+            ui_success "UI 文件已安装：$BIN_DIR/ui-dist"
+        fi
     fi
 }
 
@@ -866,8 +884,9 @@ main() {
     detect_os_or_die
     ensure_rust_toolchain
     ensure_c_toolchain
-    install_cradle_ring
+    # 关键顺序：先构建前端（生成 ui-dist），再编译二进制（embed ui-dist），最后部署
     build_webui
+    install_cradle_ring
     install_binary_and_ui
     ensure_path
     initialize_config

@@ -15,6 +15,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // 记忆引擎 V3（Cache-First + Qdrant-lite + 时序知识图谱 + 级联路由）
 use memory_engine::{MemoryEngine, MemoryEngineConfig, StoreRequest, RecallRequest};
 
+// 内嵌 UI 静态资源（永不丢失，解决 404 问题）
+// 编译时从 crates/cradle-ring/ui-dist/ 读取，打包进二进制
+use include_dir::{include_dir, Dir};
+static EMBEDDED_UI: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/ui-dist");
+
 // ============================================================================
 // 基础工具
 // ============================================================================
@@ -2279,17 +2284,26 @@ async fn handle_http(
     // 优先尝试本地 ui-dist/ 静态文件
     let exe = std::env::current_exe().unwrap_or_default();
     let exe_dir = exe.parent().unwrap_or(std::path::Path::new(".")).to_string_lossy().to_string();
+    let home = std::env::var("HOME").unwrap_or_default();
     // 候选 UI 目录列表（按优先级）
+    // 1. CRADLE_RING_UI_DIR 环境变量（systemd/launchd 服务设置）
+    // 2. 二进制同目录 ui-dist（最常见：~/.local/bin/ui-dist）
+    // 3. $HOME/.local/bin/ui-dist（标准安装位置，对所有用户有效）
+    // 4. $HOME/.cradle-ring/ui-dist（备用位置）
+    // 5. 二进制同目录 webui/dist（开发模式）
+    // 6. 二进制上级目录 webui/dist（cargo workspace 开发模式）
     let ui_candidates: Vec<String> = std::env::var("CRADLE_RING_UI_DIR").ok().into_iter()
         .chain([
             format!("{}/ui-dist", exe_dir),
-            "/home/muling/.local/bin/ui-dist".to_string(),
+            format!("{}/.local/bin/ui-dist", home),
+            format!("{}/.cradle-ring/ui-dist", home),
             format!("{}/webui/dist", exe_dir),
             format!("{}/../webui/dist", exe_dir),
         ])
+        .filter(|s| !s.is_empty())
         .collect();
 
-    // 逐个候选目录尝试
+    // 逐个候选目录尝试（外部 ui-dist，便于热更新前端）
     for dir in &ui_candidates {
         let file_path = if fs_path == "/" {
             format!("{}/index.html", dir)
@@ -2305,14 +2319,31 @@ async fn handle_http(
         }
     }
 
+    // 内嵌 UI 兜底（永不 404）：外部 ui-dist 找不到时，从编译时打包的二进制中读取
+    // 路径形如 "/" 或 "/assets/xxx.js"，去掉前导 /
+    let embed_path = fs_path.trim_start_matches('/');
+    let embed_file = if embed_path.is_empty() { "index.html" } else { embed_path };
+    if let Some(entry) = EMBEDDED_UI.get_file(embed_file) {
+        let content = entry.contents();
+        let ct = guess_mime(embed_file);
+        send_response(stream, 200, "OK", ct, content).await;
+        return;
+    }
+
     // SPA fallback（所有未匹配路径都返回 index.html，让前端路由处理）
     if !path.starts_with("/api") && !path.starts_with("/webhook") {
+        // 优先外部文件
         for dir in &ui_candidates {
             let idx = format!("{}/index.html", dir);
             if let Ok(content) = std::fs::read(&idx) {
                 send_response(stream, 200, "OK", "text/html; charset=utf-8", &content).await;
                 return;
             }
+        }
+        // 兜底：内嵌 index.html
+        if let Some(entry) = EMBEDDED_UI.get_file("index.html") {
+            send_response(stream, 200, "OK", "text/html; charset=utf-8", entry.contents()).await;
+            return;
         }
     }
 
