@@ -295,18 +295,56 @@ function Refresh-Path {
 
 # 切换到 GNU 工具链（只有 gcc 没有 MSVC 时）
 function Switch-To-Gnu-Toolchain {
-    try {
-        # 检查当前默认工具链
-        $current = rustup show 2>$null | Select-String "stable.*windows"
-        if ($current -match "msvc") {
-            Write-Step "切换 Rust 到 GNU 工具链（适配 MinGW）..."
-            rustup default stable-x86_64-pc-windows-gnu 2>$null | Out-Null
-            rustup target add x86_64-pc-windows-gnu 2>$null | Out-Null
-            Write-Success "已切换到 GNU 工具链"
-        }
-    } catch {
-        Write-Warn "工具链切换失败（可忽略，继续尝试）"
+    # 先检查当前默认工具链 host
+    $showOut = (rustup show 2>$null | Out-String)
+    if ($showOut -notmatch "msvc") { return }
+    Write-Step "切换 Rust 到 GNU 工具链（适配 MinGW）..."
+    # 关键：rustup default 之前必须先 toolchain install，否则报 "toolchain is not installed"
+    $gnuToolchain = "stable-x86_64-pc-windows-gnu"
+    & rustup toolchain install $gnuToolchain 2>&1 | Select-Object -Last 2 | ForEach-Object { Write-Info "$_" }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warn "GNU 工具链安装失败（将保持 MSVC 工具链，MinGW 链接器可能不兼容）"
+        return
     }
+    & rustup default $gnuToolchain 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Success "已切换到 GNU 工具链: $gnuToolchain"
+    } else {
+        Write-Warn "GNU 工具链切换失败"
+    }
+}
+
+# ============================================================================
+# npm/pnpm 调用辅助（绕过 PowerShell 执行策略）
+# PowerShell 调 npm 会解析到 npm.ps1（被策略拦截），必须显式调 .cmd 版本
+# ============================================================================
+function Get-NpmCmd {
+    # 返回 npm.cmd 的完整路径（或 cmd shim），找不到返回 $null
+    $candidates = @(
+        "$env:ProgramFiles\nodejs\npm.cmd",
+        "${env:ProgramFiles(x86)}\nodejs\npm.cmd",
+        "$env:APPDATA\npm\npm.cmd"
+    )
+    foreach ($c in $candidates) {
+        if (Test-Path $c) { return $c }
+    }
+    $cmd = Get-Command npm.cmd -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    return $null
+}
+
+function Get-PnpmCmd {
+    $candidates = @(
+        "$env:APPDATA\npm\pnpm.cmd",
+        "$env:LOCALAPPDATA\pnpm\pnpm.cmd",
+        "$env:ProgramFiles\nodejs\pnpm.cmd"
+    )
+    foreach ($c in $candidates) {
+        if (Test-Path $c) { return $c }
+    }
+    $cmd = Get-Command pnpm.cmd -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    return $null
 }
 
 # ============================================================================
@@ -372,28 +410,43 @@ function Build-Webui {
 
     Write-Info "Node.js: $(node --version)"
 
+    # 关键：PowerShell 里 npm/pnpm 的 .ps1 shim 会被执行策略拦截，
+    # 必须显式调用 .cmd 版本（CMD shim 不受策略限制）
+    $npmCmd = Get-NpmCmd
+    $pnpmCmd = Get-PnpmCmd
+    if (-not $hasPnpm -and -not $pnpmCmd) { $pnpmCmd = $null }
+    if (-not $hasNpm -and -not $npmCmd) { $npmCmd = $null }
+    if (-not $npmCmd -and -not $pnpmCmd) {
+        Write-Warn "未找到 npm.cmd / pnpm.cmd，跳过前端构建"
+        Write-Info "二进制会使用内嵌的默认 UI（功能完整）"
+        return
+    }
+
     Push-Location $webuiDir
     try {
-        if ($hasPnpm) {
+        # 没有 pnpm 就用 npm 全局装一个
+        if (-not $pnpmCmd -and $npmCmd) {
+            Write-Info "安装 pnpm（全局）..."
+            & $npmCmd install -g pnpm 2>&1 | Select-Object -Last 2 | ForEach-Object { Write-Info "$_" }
+            Refresh-Path
+            $pnpmCmd = Get-PnpmCmd
+        }
+
+        if ($pnpmCmd) {
             Write-Info "使用 pnpm 安装依赖..."
-            pnpm install --no-frozen-lockfile --ignore-scripts 2>&1 | Select-Object -Last 3
+            & $pnpmCmd install --no-frozen-lockfile --ignore-scripts 2>&1 | Select-Object -Last 3 | ForEach-Object { Write-Info "$_" }
             Write-Info "构建生产包..."
             # 直接调 vite 避免 pnpm 11 的 build 脚本检查
             if (Test-Path ".\node_modules\.bin\vite.cmd") {
-                & .\node_modules\.bin\vite.cmd build 2>&1 | Select-Object -Last 5
+                & .\node_modules\.bin\vite.cmd build 2>&1 | Select-Object -Last 5 | ForEach-Object { Write-Info "$_" }
             } else {
-                pnpm run build 2>&1 | Select-Object -Last 5
+                & $pnpmCmd run build 2>&1 | Select-Object -Last 5 | ForEach-Object { Write-Info "$_" }
             }
-        } elseif ($hasNpm) {
+        } elseif ($npmCmd) {
             Write-Info "使用 npm 安装依赖..."
-            npm install --no-frozen-lockfile 2>&1 | Select-Object -Last 3
+            & $npmCmd install --no-frozen-lockfile 2>&1 | Select-Object -Last 3 | ForEach-Object { Write-Info "$_" }
             Write-Info "构建生产包..."
-            npm run build 2>&1 | Select-Object -Last 5
-        } else {
-            Write-Info "安装 pnpm..."
-            npm install -g pnpm 2>&1 | Out-Null
-            pnpm install --no-frozen-lockfile --ignore-scripts 2>&1 | Select-Object -Last 3
-            & .\node_modules\.bin\vite.cmd build 2>&1 | Select-Object -Last 5
+            & $npmCmd run build 2>&1 | Select-Object -Last 5 | ForEach-Object { Write-Info "$_" }
         }
 
         if (Test-Path "$webuiDir\dist\assets") {

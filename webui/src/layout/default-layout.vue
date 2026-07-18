@@ -1,6 +1,6 @@
 <template>
   <a-layout class="layout-wrapper">
-    <!-- 侧栏 -->
+    <!-- 侧栏（白色，Materialize 风格） -->
     <a-layout-sider
       :width="260"
       :collapsed-width="64"
@@ -13,20 +13,15 @@
       <!-- Logo -->
       <div class="app-brand">
         <div class="app-brand-logo">
-          <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <circle cx="16" cy="16" r="14" fill="url(#brand-grad)"/>
-            <path d="M10 12L16 8L22 12V20L16 24L10 20V12Z" stroke="#fff" stroke-width="1.5" fill="none"/>
-            <circle cx="16" cy="16" r="3" fill="#fff"/>
-            <defs>
-              <linearGradient id="brand-grad" x1="0" y1="0" x2="32" y2="32">
-                <stop offset="0%" stop-color="#8c57ff"/>
-                <stop offset="100%" stop-color="#16b1ff"/>
-              </linearGradient>
-            </defs>
+          <svg viewBox="0 0 34 28" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M2 4 L12 10 L12 22 L2 16 Z" fill="#8c57ff"/>
+            <path d="M12 10 L22 4 L22 16 L12 22 Z" fill="#7e4ee6"/>
+            <path d="M22 4 L32 10 L32 22 L22 16 Z" fill="#a785fa"/>
+            <path d="M12 10 L12 22 L17 25 L17 13 Z" fill="#6d40d8" opacity="0.7"/>
           </svg>
         </div>
         <transition name="fade">
-          <span v-if="!appStore.menuCollapse" class="app-brand-text logo-text">CradleRing</span>
+          <span v-if="!appStore.menuCollapse" class="app-brand-text">CradleRing</span>
         </transition>
       </div>
       <app-menu :collapsed="appStore.menuCollapse" />
@@ -34,7 +29,7 @@
 
     <!-- 主内容区 -->
     <a-layout class="layout-page" :style="{ marginLeft: appStore.menuCollapse ? '64px' : '260px', transition: 'margin-left 0.25s ease' }">
-      <!-- 顶部导航 -->
+      <!-- 顶部导航（detached 风格：透明底，悬浮于内容之上） -->
       <a-layout-header class="layout-header">
         <app-navbar />
       </a-layout-header>
@@ -65,9 +60,10 @@ const appStore = useAppStore();
   background-color: var(--color-bg-2);
 }
 
+/* 侧栏：白色底 + 右侧轻阴影（Materialize layout-menu） */
 .layout-sider {
   background-color: var(--color-bg-1);
-  border-right: 1px solid var(--color-border-1);
+  box-shadow: 0 0.125rem 0.5rem 0 rgba(46, 38, 61, 0.08);
   :deep(.arco-layout-sider-children) {
     display: flex;
     flex-direction: column;
@@ -75,38 +71,40 @@ const appStore = useAppStore();
   }
 }
 
+/* Logo 区 */
 .app-brand {
   height: var(--navbar-height);
   display: flex;
   align-items: center;
-  padding: 0 20px;
+  padding: 0 22px;
   gap: 12px;
-  border-bottom: 1px solid var(--color-border-1);
   flex-shrink: 0;
 
   .app-brand-logo {
-    width: 36px;
-    height: 36px;
+    width: 34px;
+    height: 28px;
     display: flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
-    svg { width: 32px; height: 32px; }
+    svg { width: 34px; height: 28px; }
   }
 
   .app-brand-text {
     font-size: 18px;
     font-weight: 700;
+    color: var(--color-text-1);
     letter-spacing: 0.5px;
     white-space: nowrap;
   }
 }
 
+/* 顶栏：detached 风格（透明底，无边框） */
 .layout-header {
   height: var(--navbar-height);
   padding: 0;
-  background-color: var(--color-bg-1);
-  border-bottom: 1px solid var(--color-border-1);
+  background-color: transparent;
+  border: none;
   position: sticky;
   top: 0;
   z-index: 99;

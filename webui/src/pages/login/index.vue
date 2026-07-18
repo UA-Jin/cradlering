@@ -1,86 +1,57 @@
 <template>
-  <div class="login-container">
-    <div class="login-banner">
-      <div class="banner-inner">
-        <div class="logo-row">
-          <icon-storage class="logo-icon" />
-          <span class="logo-text">CradleRing</span>
-        </div>
-        <h1 class="slogan">AI Agent 智能协作平台</h1>
-        <p class="subtitle">企业级 AI Agent 协作平台 · 多级审批 · 多账号 · 全渠道接入</p>
-        <div class="features">
-          <div class="feature-item"><icon-check-circle /> 40+ IM 渠道真实连接</div>
-          <div class="feature-item"><icon-check-circle /> 多级审批工作流</div>
-          <div class="feature-item"><icon-check-circle /> 多账号角色权限</div>
-          <div class="feature-item"><icon-check-circle /> 28+ 内置工具</div>
-          <div class="feature-item"><icon-check-circle /> 15+ 搜索引擎</div>
-          <div class="feature-item"><icon-check-circle /> 无损上下文压缩</div>
-        </div>
-      </div>
-    </div>
+  <div class="auth-wrapper">
+    <!-- 背景装饰（Materialize 树插图） -->
+    <img src="/illustrations/auth-basic-mask-light.png" class="auth-mask" alt="" />
+    <img src="/illustrations/tree.png" class="auth-tree-left" alt="" />
+    <img src="/illustrations/tree-3.png" class="auth-tree-right" alt="" />
 
-    <div class="login-form-wrap">
-      <div class="login-form">
-        <div class="form-header">
-          <h2>欢迎回来 👋</h2>
-          <p>请使用您的账号登录控制台</p>
-        </div>
-
-        <a-form
-          ref="formRef"
-          :model="form"
-          :rules="rules"
-          layout="vertical"
-          @submit="onSubmit"
-        >
-          <a-form-item field="username" label="用户名">
-            <a-input
-              v-model="form.username"
-              placeholder="请输入用户名"
-              size="large"
-              allow-clear
-            >
-              <template #prefix><icon-user /></template>
-            </a-input>
-          </a-form-item>
-          <a-form-item field="password" label="密码">
-            <a-input-password
-              v-model="form.password"
-              placeholder="请输入密码"
-              size="large"
-              allow-clear
-              @keyup.enter="onSubmit"
-            >
-              <template #prefix><icon-lock /></template>
-            </a-input-password>
-          </a-form-item>
-          <a-form-item>
-            <div class="form-options">
-              <a-checkbox v-model="form.remember">记住我</a-checkbox>
-              <a-link>忘记密码？</a-link>
-            </div>
-          </a-form-item>
-          <a-form-item>
-            <a-button
-              type="primary"
-              html-type="submit"
-              long
-              size="large"
-              :loading="userStore.loading"
-            >
-              登录
-            </a-button>
-          </a-form-item>
-          <a-form-item v-if="showInitTip">
-            <a-alert type="info" banner>
-              首次安装后，请使用安装时生成的随机密码登录
-            </a-alert>
-          </a-form-item>
-        </a-form>
+    <div class="auth-card">
+      <!-- Logo -->
+      <div class="auth-brand">
+        <svg class="brand-logo" width="34" height="28" viewBox="0 0 34 28" fill="none">
+          <path d="M2 4 L12 10 L12 22 L2 16 Z" fill="#8c57ff"/>
+          <path d="M12 10 L22 4 L22 16 L12 22 Z" fill="#7e4ee6"/>
+          <path d="M22 4 L32 10 L32 22 L22 16 Z" fill="#a785fa"/>
+          <path d="M12 10 L12 22 L17 25 L17 13 Z" fill="#6d40d8" opacity="0.7"/>
+        </svg>
+        <span class="brand-text">CradleRing</span>
       </div>
 
-      <div class="footer">
-        Copyright © 2026 CradleRing · 基于 Arco Design Pro
+      <!-- 标题 -->
+      <h3 class="auth-title">欢迎回来！👋</h3>
+      <p class="auth-subtitle">请登录您的账号，开始 AI Agent 协作之旅</p>
+
+      <!-- 表单 -->
+      <a-form :model="form" :rules="rules" layout="vertical" @submit="onSubmit">
+        <a-form-item field="username" label="用户名" hide-asterisk>
+          <a-input v-model="form.username" placeholder="请输入用户名" size="large" allow-clear>
+            <template #prefix><icon-user /></template>
+          </a-input>
+        </a-form-item>
+        <a-form-item field="password" label="密码" hide-asterisk>
+          <a-input-password v-model="form.password" placeholder="请输入密码" size="large" allow-clear>
+            <template #prefix><icon-lock /></template>
+          </a-input-password>
+        </a-form-item>
+
+        <div class="auth-options">
+          <a-checkbox v-model="form.remember">记住我</a-checkbox>
+          <a-link class="forgot-link">忘记密码？</a-link>
+        </div>
+
+        <a-button type="primary" html-type="submit" size="large" long :loading="userStore.loading" class="login-btn">
+          登录
+        </a-button>
+      </a-form>
+
+      <!-- 首次安装提示 -->
+      <div v-if="showInitTip" class="init-tip">
+        <icon-info-circle />
+        <span>首次安装后，请使用安装时生成的随机凭据登录（保存在数据目录 <code>.admin_credentials</code>）</span>
+      </div>
+
+      <div class="auth-footer">
+        Copyright © 2026 CradleRing
       </div>
     </div>
   </div>
@@ -91,6 +62,7 @@ import { reactive, ref, onMounted } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
 import { useUserStore } from '@/stores/user';
+import { IconUser, IconLock, IconInfoCircle } from '@arco-design/web-vue/es/icon';
 
 const router = useRouter();
 const route = useRoute();
@@ -133,134 +105,170 @@ onMounted(() => {
 </script>
 
 <style lang="less" scoped>
-.login-container {
-  display: flex;
-  height: 100vh;
-  background-color: var(--color-bg-1);
-}
-
-.login-banner {
-  flex: 1;
-  background: linear-gradient(135deg, #8c57ff 0%, #16b1ff 100%);
-  color: #fff;
+.auth-wrapper {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
-  position: relative;
+  min-height: 100vh;
+  background-color: #f8f7fa;
   overflow: hidden;
-
-  &::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    background-image: radial-gradient(circle at 20% 30%, rgba(255, 255, 255, 0.15) 0%, transparent 50%),
-      radial-gradient(circle at 80% 70%, rgba(255, 255, 255, 0.1) 0%, transparent 50%);
-  }
 }
 
-.banner-inner {
+body[arco-theme='dark'] .auth-wrapper {
+  background-color: #28243d;
+}
+
+/* 背景装饰 */
+.auth-mask {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  height: 172px;
+  object-fit: cover;
+  opacity: 0.9;
+  pointer-events: none;
+}
+.auth-tree-left {
+  position: absolute;
+  bottom: 8%;
+  left: 4%;
+  width: 150px;
+  pointer-events: none;
+  z-index: 1;
+}
+.auth-tree-right {
+  position: absolute;
+  bottom: 8%;
+  right: 4%;
+  width: 180px;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* 登录卡片 */
+.auth-card {
   position: relative;
-  max-width: 460px;
-  padding: 0 40px;
+  z-index: 2;
+  width: 460px;
+  max-width: calc(100vw - 32px);
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 0.25rem 1rem 0 rgba(46, 38, 61, 0.1);
+  padding: 40px 40px 24px;
 }
 
-.logo-row {
+body[arco-theme='dark'] .auth-card {
+  background: #2f2b40;
+  box-shadow: 0 0.25rem 1rem 0 rgba(0, 0, 0, 0.35);
+}
+
+/* Logo */
+.auth-brand {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 12px;
   margin-bottom: 32px;
-
-  .logo-icon {
-    font-size: 40px;
+  .brand-logo {
+    display: block;
   }
-  .logo-text {
-    font-size: 28px;
-    font-weight: 800;
-    letter-spacing: 1px;
+  .brand-text {
+    font-size: 24px;
+    font-weight: 700;
+    color: var(--color-text-1);
+    letter-spacing: 0.5px;
   }
 }
 
-.slogan {
-  font-size: 36px;
+/* 标题 */
+.auth-title {
+  font-size: 22px;
   font-weight: 700;
-  line-height: 1.3;
-  margin: 0 0 16px;
+  color: var(--color-text-1);
+  margin: 0 0 8px;
 }
-
-.subtitle {
-  font-size: 15px;
-  opacity: 0.9;
-  margin: 0 0 40px;
+.auth-subtitle {
+  font-size: 14px;
+  color: var(--color-text-3);
+  margin: 0 0 28px;
   line-height: 1.6;
 }
 
-.features {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-
-  .feature-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 14px;
-    opacity: 0.95;
+/* 表单间距 */
+:deep(.arco-form-item) {
+  margin-bottom: 22px;
+}
+:deep(.arco-form-item-label) {
+  font-weight: 500;
+  color: var(--color-text-2);
+  font-size: 13px;
+}
+:deep(.arco-input-wrapper),
+:deep(.arco-input-password) {
+  border-radius: 6px;
+  &:hover {
+    border-color: var(--primary-6);
   }
 }
 
-.login-form-wrap {
-  width: 460px;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  padding: 0 60px;
-  background-color: var(--color-bg-1);
-}
-
-.login-form {
-  width: 100%;
-  max-width: 340px;
-  margin: 0 auto;
-}
-
-.form-header {
-  text-align: center;
-  margin-bottom: 32px;
-
-  h2 {
-    font-size: 26px;
-    font-weight: 700;
-    margin: 0 0 8px;
-    color: var(--color-text-1);
-  }
-  p {
-    font-size: 14px;
-    color: var(--color-text-3);
-    margin: 0;
-  }
-}
-
-.form-options {
+/* 记住我 + 忘记密码 */
+.auth-options {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  width: 100%;
+  margin-bottom: 24px;
+  .forgot-link {
+    font-size: 13px;
+  }
 }
 
-.footer {
-  text-align: center;
-  margin-top: 40px;
+/* 登录按钮 */
+.login-btn {
+  height: 44px;
+  font-size: 15px;
+  font-weight: 500;
+  border-radius: 6px;
+}
+
+/* 首次提示 */
+.init-tip {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 20px;
+  padding: 12px 14px;
+  background: rgba(22, 177, 255, 0.08);
+  border-radius: 6px;
   font-size: 12px;
   color: var(--color-text-3);
+  line-height: 1.6;
+  svg {
+    color: #16b1ff;
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+  code {
+    background: var(--color-bg-3);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 11px;
+  }
 }
 
-@media (max-width: 768px) {
-  .login-banner {
+/* 页脚 */
+.auth-footer {
+  margin-top: 32px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--color-text-4);
+}
+
+/* 移动端：隐藏插图 */
+@media (max-width: 992px) {
+  .auth-tree-left, .auth-tree-right, .auth-mask {
     display: none;
-  }
-  .login-form-wrap {
-    width: 100%;
-    padding: 0 20px;
   }
 }
 </style>

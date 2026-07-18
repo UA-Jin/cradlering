@@ -43,7 +43,7 @@
 
       <a-dropdown trigger="click">
         <div class="navbar-user">
-          <div class="user-avatar" :style="{ background: 'linear-gradient(135deg, #8c57ff, #16b1ff)' }">
+          <div class="user-avatar" :style="{ background: 'var(--primary-6)', boxShadow: 'var(--shadow-xs)' }">
             {{ (userStore.user?.displayName || 'U').charAt(0) }}
           </div>
           <span class="user-name">{{ userStore.user?.displayName || '未登录' }}</span>

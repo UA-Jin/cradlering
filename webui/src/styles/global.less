@@ -1,40 +1,56 @@
 @import '@arco-design/web-vue/es/style/theme/index.less';
 
 // ============================================================================
-// CradleRing 设计系统（移植自 Materialize 模板）
-// 紫色系 / 圆角卡片 / 深色暗色主题
+// CradleRing 设计系统 V2（严格对齐 Materialize / Materio Bootstrap 5 模板）
+// 参考：新建文件夹 (2)/assets/vendor/css/core.css 实测提取
 // ============================================================================
 
-// ---------- 配色系统（对齐 Materialize）----------
+// ---------- 配色系统 ----------
+// 关键：Arco 内部用 rgb(var(--primary-6))，所以主色变量必须是 RGB 三元组！
+// 自己的规则请用 --brand-* hex 变量
 :root {
-  // 主色（紫罗兰）
-  --primary-1: #f3effe;
-  --primary-2: #e8e0fe;
-  --primary-3: #d6c6fd;
-  --primary-4: #c1a8fc;
-  --primary-5: #a785fa;
-  --primary-6: #8c57ff;
-  --primary-7: #7340e0;
-  --primary-8: #5a30c0;
-  --primary-9: #4320a0;
-  --primary-10: #2d1080;
+  // 主色（RGB 三元组，供 Arco rgb() 使用）
+  --primary-1: 243, 239, 254;
+  --primary-2: 232, 224, 254;
+  --primary-3: 214, 198, 253;
+  --primary-4: 193, 168, 252;
+  --primary-5: 167, 133, 250;
+  --primary-6: 140, 87, 255;
+  --primary-7: 126, 78, 230;
+  --primary-8: 112, 70, 204;
+  --primary-9: 90, 48, 192;
+  --primary-10: 67, 32, 160;
 
-  // 功能色（对齐 Materialize）
-  --success-6: #56ca00;
-  --warning-6: #ffb400;
-  --danger-6: #ff4c51;
-  --info-6: #16b1ff;
+  // 功能色（RGB 三元组）
+  --red-6: 255, 76, 81;
+  --green-6: 86, 202, 0;
+  --orange-6: 255, 180, 0;
+  --arcoblue-6: 140, 87, 255;  // 覆盖 Arco 默认蓝 → 紫
+  --success-6: 86, 202, 0;
+  --warning-6: 255, 180, 0;
+  --danger-6: 255, 76, 81;
+  --info-6: 22, 177, 255;
 
-  // 背景
-  --color-bg-1: #ffffff;
-  --color-bg-2: #f8f7fa;
-  --color-bg-3: #f2f0f5;
-  --color-bg-4: #ebe8f0;
+  // 自己的 hex 变量（供组件 CSS 直接使用）
+  --brand-primary: #8c57ff;
+  --brand-primary-hover: #7e4ee6;
+  --brand-primary-active: #7046cc;
+  --brand-primary-light: #b394ff;
+  --brand-success: #56ca00;
+  --brand-warning: #ffb400;
+  --brand-danger: #ff4c51;
+  --brand-info: #16b1ff;
+
+  // 浅色背景（Materialize 浅紫灰）
+  --color-bg-1: #ffffff;      // 卡片
+  --color-bg-2: #f8f7fa;      // 页面底
+  --color-bg-3: #f2f0f5;      // 表头/浅底
+  --color-bg-4: #eae8ef;
   --color-border-1: #eae9ec;
   --color-border-2: #d5d4d8;
   --color-border-3: #c0bec5;
 
-  // 文字
+  // 文字（偏紫的深色）
   --color-text-1: #2e263d;
   --color-text-2: #433c50;
   --color-text-3: #6d6777;
@@ -44,34 +60,35 @@
   --navbar-height: 64px;
   --menu-width: 260px;
   --menu-collapsed-width: 64px;
-  --card-radius: 10px;
-  --card-shadow: 0 2px 8px rgba(46, 38, 61, 0.06);
-  --card-shadow-hover: 0 8px 24px rgba(46, 38, 61, 0.12);
+  --card-radius: 6px;
 
-  // Arco 主题色覆盖
-  --primary-6: 140, 87, 255;
+  // 阴影（实测 core.css）
+  --shadow-xs: 0 0.125rem 0.25rem 0 rgba(46, 38, 61, 0.16);
+  --shadow-sm: 0 0.1875rem 0.375rem 0 rgba(46, 38, 61, 0.18);
+  --card-shadow: 0 0.25rem 1rem 0 rgba(46, 38, 61, 0.1);
+  --card-shadow-hover: 0 0.5rem 1.5rem 0 rgba(46, 38, 61, 0.16);
 }
 
-// ---------- Dark 主题（Materialize 深紫黑）----------
+// ---------- Dark 主题 ----------
 body[arco-theme='dark'] {
-  --color-bg-1: #28243d;
-  --color-bg-2: #2c2842;
-  --color-bg-3: #403c5a;
-  --color-bg-4: #4d4868;
+  --color-bg-1: #2f2b40;      // 卡片
+  --color-bg-2: #28243d;      // 页面底
+  --color-bg-3: #3a3650;
+  --color-bg-4: #454164;
   --color-border-1: #403c5a;
-  --color-border-2: #686480;
-  --color-border-3: #7a7692;
+  --color-border-2: #565172;
+  --color-border-3: #686480;
 
   --color-text-1: #e7e3fc;
   --color-text-2: #c3bfd9;
   --color-text-3: #b0acc7;
   --color-text-4: #7a7692;
 
-  --card-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
-  --card-shadow-hover: 0 8px 24px rgba(0, 0, 0, 0.4);
+  --card-shadow: 0 0.25rem 1rem 0 rgba(0, 0, 0, 0.35);
+  --card-shadow-hover: 0 0.5rem 1.5rem 0 rgba(0, 0, 0, 0.45);
 }
 
-// ---------- 基础重置 ----------
+// ---------- 基础 ----------
 html, body, #app {
   height: 100%;
   margin: 0;
@@ -91,10 +108,10 @@ body {
 }
 
 a {
-  color: rgb(var(--primary-6));
+  color: var(--brand-primary);
   text-decoration: none;
   transition: color 0.2s;
-  &:hover { color: var(--primary-7); }
+  &:hover { color: var(--brand-primary-hover); }
 }
 
 // ---------- 滚动条 ----------
@@ -112,44 +129,91 @@ a {
   margin: 0 auto;
 }
 
-// ---------- 卡片（核心视觉元素）----------
+// ---------- 卡片 ----------
 .arco-card {
   border-radius: var(--card-radius) !important;
-  box-shadow: var(--card-shadow);
+  box-shadow: var(--card-shadow) !important;
   border: none !important;
+  background-color: var(--color-bg-1) !important;
   transition: box-shadow 0.25s ease, transform 0.25s ease;
   &:hover {
-    box-shadow: var(--card-shadow-hover);
-    transform: translateY(-2px);
+    box-shadow: var(--card-shadow-hover) !important;
   }
 }
 
-body[arco-theme='dark'] .arco-card {
-  background-color: var(--color-bg-2) !important;
-}
-
-// ---------- 按钮（渐变主色）----------
-.arco-btn-primary {
-  background: linear-gradient(135deg, var(--primary-6), var(--primary-5));
-  border: none !important;
+// ---------- 按钮（Materialize 实心紫，不是渐变！）----------
+// hover 加深 + active 阴影（对齐 core.css .btn-primary）
+.arco-btn-primary:not(.arco-btn-status-success):not(.arco-btn-status-warning):not(.arco-btn-status-danger) {
+  background: var(--brand-primary) !important;
+  border-color: var(--brand-primary) !important;
+  color: #fff !important;
+  font-weight: 500;
   &:hover {
-    background: linear-gradient(135deg, var(--primary-5), var(--primary-4));
+    background: var(--brand-primary-hover) !important;
+    border-color: var(--brand-primary-active) !important;
+  }
+  &:active {
+    background: var(--brand-primary-hover) !important;
+    box-shadow: var(--shadow-xs) !important;
   }
 }
+// 大按钮圆角
+.arco-btn {
+  border-radius: 6px;
+}
 
-// ---------- 菜单（圆角 hover）----------
+// ---------- 菜单（Materialize 核心签名样式）----------
+// 侧栏白底（dark 模式深色）
+.arco-layout-sider {
+  background-color: var(--color-bg-1) !important;
+}
+body[arco-theme='dark'] .arco-layout-sider {
+  background-color: var(--color-bg-1) !important;
+}
+
+// 普通菜单项
+.arco-menu-light {
+  background-color: transparent;
+}
 .arco-menu-item {
-  border-radius: 8px;
-  margin: 2px 10px;
-  transition: all 0.2s ease;
+  border-radius: 6px;
+  margin: 2px 12px;
+  min-height: 38px;
+  font-size: 0.9375rem;
+  color: var(--color-text-2);
+  transition: background-color 0.2s ease, color 0.2s ease;
   &:hover {
     background-color: var(--color-bg-3);
+    color: var(--color-text-1);
   }
 }
+.arco-menu-inline-header {
+  border-radius: 6px;
+  margin: 2px 12px;
+  min-height: 38px;
+  color: var(--color-text-2);
+  &:hover {
+    background-color: var(--color-bg-3);
+    color: var(--color-text-1);
+  }
+}
+
+// 选中项：Materialize 签名渐变胶囊（左实右虚 + 阴影）
 .arco-menu-selected {
-  background: linear-gradient(135deg, rgba(140, 87, 255, 0.1), rgba(140, 87, 255, 0.05)) !important;
-  color: var(--primary-6) !important;
+  background: linear-gradient(90deg, var(--brand-primary) 0%, #b394ff 100%) !important;
+  color: #fff !important;
   font-weight: 500;
+  box-shadow: var(--shadow-sm);
+  .arco-icon, svg { color: #fff !important; }
+  &:hover {
+    background: linear-gradient(90deg, var(--brand-primary) 0%, #b394ff 100%) !important;
+    color: #fff !important;
+  }
+}
+// 子菜单选中父级
+.arco-menu-inline-header.arco-menu-selected {
+  background: linear-gradient(90deg, var(--brand-primary) 0%, #b394ff 100%) !important;
+  color: #fff !important;
 }
 
 // ---------- 表格 ----------
@@ -162,43 +226,61 @@ body[arco-theme='dark'] .arco-card {
   }
 }
 
-// ---------- 品牌渐变 Logo ----------
+// ---------- 品牌 Logo 文字 ----------
 .logo-text {
-  background: linear-gradient(135deg, var(--primary-6), #16b1ff);
+  background: linear-gradient(135deg, var(--brand-primary), #16b1ff);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
 }
 
-// ---------- 渐变背景工具类 ----------
-.bg-gradient-primary {
-  background: linear-gradient(135deg, var(--primary-6), var(--primary-4));
+// ---------- 彩色统计图标（Materialize avatar-initial 风格）----------
+.stat-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 8px;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  flex-shrink: 0;
+  box-shadow: var(--shadow-xs);
 }
-.bg-gradient-success {
-  background: linear-gradient(135deg, #56ca00, #82e040);
-}
-.bg-gradient-warning {
-  background: linear-gradient(135deg, #ffb400, #ffd040);
-}
-.bg-gradient-danger {
-  background: linear-gradient(135deg, #ff4c51, #ff8083);
-}
-.bg-gradient-info {
-  background: linear-gradient(135deg, #16b1ff, #56d0ff);
+.stat-icon-purple { background: var(--brand-primary); }
+.stat-icon-green  { background: var(--brand-success); }
+.stat-icon-yellow { background: var(--brand-warning); }
+.stat-icon-blue   { background: var(--brand-info); }
+.stat-icon-red    { background: var(--brand-danger); }
+
+// ---------- 统计数字 ----------
+.stat-number {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--color-text-1);
+  &.text-primary { color: var(--brand-primary); }
+  &.text-success { color: var(--brand-success); }
+  &.text-warning { color: var(--brand-warning); }
+  &.text-danger  { color: var(--brand-danger); }
 }
 
-// ---------- 暗色毛玻璃侧栏 ----------
-body[arco-theme='dark'] {
-  .arco-layout-sider {
-    background-color: rgba(40, 36, 61, 0.85);
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
-  }
-  .arco-layout-header {
-    background-color: rgba(40, 36, 61, 0.85);
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
-  }
+// ---------- 小百分比徽章 ----------
+.badge-up {
+  color: var(--brand-success);
+  font-size: 12px;
+  font-weight: 600;
+}
+.badge-down {
+  color: var(--brand-danger);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+// ---------- 标签 ----------
+.arco-tag {
+  border-radius: 6px;
+  font-weight: 500;
 }
 
 // ---------- 路由切换动画 ----------
@@ -214,24 +296,7 @@ body[arco-theme='dark'] {
   transform: translateY(-8px);
 }
 
-// ---------- 统计数字（大号渐变）----------
-.stat-number {
-  font-size: 28px;
-  font-weight: 700;
-  line-height: 1.2;
-  &.text-primary { color: var(--primary-6); }
-  &.text-success { color: var(--success-6); }
-  &.text-warning { color: var(--warning-6); }
-  &.text-danger { color: var(--danger-6); }
-}
-
-// ---------- 标签徽章（圆角药丸）----------
-.arco-tag {
-  border-radius: 6px;
-  font-weight: 500;
-}
-
-// ---------- 页头间距工具类 ----------
+// ---------- 工具类 ----------
 .mt-8 { margin-top: 8px; }
 .mt-16 { margin-top: 16px; }
 .mt-24 { margin-top: 24px; }
