@@ -257,16 +257,6 @@ async function send() {
   messages.value.push({ role: 'user', content: text, ts: Date.now() });
   await scrollBottom();
 
-  // 首次引导模式：不调用 LLM，直接本地处理回答
-  if (onboardingStep.value > 0 && onboardingStep.value < 4) {
-    sending.value = false;
-    setTimeout(() => {
-      handleOnboardingAnswer(text);
-      scrollBottom();
-    }, 300);
-    return;
-  }
-
   try {
     // chat.send：触发 Cache-First agent loop（流式结果通过 chat 事件 deltaText 推送）
     const res = await rpc.call<any>('chat.send', { sessionKey: currentKey.value, message: text });
@@ -322,93 +312,11 @@ async function scrollBottom() {
 
 let unsubs: (() => void)[] = [];
 
-// ========== 首次引导（OpenClaw 风格：问名字/角色/偏好） ==========
-const onboardingStep = ref(0); // 0=未开始 1=问名字 2=问角色 3=问偏好 4=完成
-const onboardingData = reactive({ name: '', role: '', preference: '' });
-
-async function checkOnboarding() {
-  // 检查是否首次使用（没有用户资料或 onboarding 标记）
-  try {
-    const res = await rpc.call<any>('users.me');
-    if (!res?.user?.displayName || res.user.displayName === res.user.username) {
-      // 首次使用：启动引导对话
-      startOnboarding();
-    }
-  } catch {
-    // 忽略
-  }
-}
-
-function startOnboarding() {
-  onboardingStep.value = 1;
-  // 创建引导会话
-  const key = `onboarding-${Date.now().toString(36)}`;
-  rpc.call('sessions.create', {
-    key, kind: 'onboarding', displayName: '首次设置向导', agentId: 'main',
-  }).then(() => {
-    loadSessions().then(() => selectSession(key));
-    // 发送第一条引导消息（AI 主动问）
-    setTimeout(() => {
-      messages.value.push({
-        role: 'assistant',
-        content: '你好！我是 CradleRing AI 助手 🤖\n\n在开始之前，我想先了解一下你，这样我可以更好地为你服务。\n\n**请问怎么称呼你？**（比如：张三、小明、Alice）',
-        ts: Date.now(),
-      });
-    }, 300);
-  });
-}
-
-function handleOnboardingAnswer(text: string) {
-  if (onboardingStep.value === 1) {
-    onboardingData.name = text;
-    onboardingStep.value = 2;
-    messages.value.push({
-      role: 'assistant',
-      content: `很高兴认识你，**${text}**！👋\n\n接下来想了解一下你的工作。你主要是做什么的？\n\n比如：\n- 运维工程师 / DevOps\n- 开发工程师（前端/后端/全栈）\n- 系统管理员\n- 安全工程师\n- 其他（请描述）`,
-      ts: Date.now(),
-    });
-  } else if (onboardingStep.value === 2) {
-    onboardingData.role = text;
-    onboardingStep.value = 3;
-    messages.value.push({
-      role: 'assistant',
-      content: `明白了，${text}的工作很有挑战性！💪\n\n最后一个问题：你希望我重点帮你做什么？\n\n比如：\n- 自动化运维（服务器管理/部署/监控）\n- 安全防护（入侵检测/WAF/漏洞扫描）\n- 代码开发（写代码/调试/审查）\n- 知识管理（文档/记忆/搜索）\n- 日常使用（聊天/问答/助手）`,
-      ts: Date.now(),
-    });
-  } else if (onboardingStep.value === 3) {
-    onboardingData.preference = text;
-    onboardingStep.value = 4;
-    // 保存用户资料到后端
-    saveOnboardingProfile();
-    messages.value.push({
-      role: 'assistant',
-      content: `太好了！我已经了解你了，${onboardingData.name}。🎉\n\n我会重点关注**${text}**方面的需求。\n\n你的 CradleRing 已经准备好了！有什么我可以帮你的吗？\n\n**试试这些：**\n- "帮我看看服务器状态"\n- "扫描一下安全漏洞"\n- "帮我写一个部署脚本"\n- "搜索最新的 Rust 教程"`,
-      ts: Date.now(),
-    });
-  }
-}
-
-async function saveOnboardingProfile() {
-  try {
-    // 保存用户资料（displayName + role + preference）
-    await rpc.call('users.updateProfile', {
-      displayName: onboardingData.name,
-      role: onboardingData.role,
-      preference: onboardingData.preference,
-    });
-    // 同时存到记忆库（长期记忆）
-    await rpc.call('memory.add', {
-      body: `用户 ${onboardingData.name} 是 ${onboardingData.role}，重点关注 ${onboardingData.preference}`,
-      kind: 'preference',
-      source: 'onboarding',
-    });
-  } catch { /* ignore */ }
-}
+// 首次引导已移至个人中心页面（不再侵入聊天）
 
 onMounted(async () => {
   await loadSessions();
-  // 检查是否需要首次引导
-  checkOnboarding();
+  // 首次引导已移至个人中心（不再劫持聊天页面）
   // 订阅流式增量（Cache-First agent loop 推送 deltaText）
   unsubs.push(rpc.on('chat', (p: any) => {
     if (p.sessionKey !== currentKey.value) return;

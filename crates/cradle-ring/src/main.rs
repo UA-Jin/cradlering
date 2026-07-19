@@ -9003,10 +9003,20 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
                 if i == 0 { continue; }  // 跳过表头
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if parts.len() >= 11 {
+                    let full_cmd = parts[10..].join(" ");
+                    // 从完整命令行提取进程名（去掉路径前缀和参数）
+                    let name = full_cmd.split_whitespace().next()
+                        .and_then(|c| c.split('/').last())
+                        .unwrap_or("unknown").to_string();
+                    let pid: u32 = parts[1].parse().unwrap_or(0);
+                    let cpu: f64 = parts[2].parse().unwrap_or(0.0);
+                    let mem: f64 = parts[3].parse().unwrap_or(0.0);
+                    let rss: u64 = parts[5].parse().unwrap_or(0);
+                    let state = parts[7].chars().next().unwrap_or('?').to_string();
                     processes.push(json!({
-                        "user": parts[0], "pid": parts[1], "cpu": parts[2], "mem": parts[3],
-                        "vsz": parts[4], "rss": parts[5], "tty": parts[6], "stat": parts[7],
-                        "start": parts[8], "time": parts[9], "command": parts[10..].join(" "),
+                        "pid": pid, "name": name, "cmd": full_cmd,
+                        "user": parts[0], "cpu": cpu, "mem": mem,
+                        "rss": rss, "state": state,
                     }));
                 }
             }
@@ -9849,7 +9859,7 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
             })
         }
         "env.install" => {
-            let env_id = params["env"].as_str().or(params["name"].as_str()).unwrap_or("").trim().to_string().to_lowercase();
+            let env_id = params["id"].as_str().or(params["env"].as_str()).or(params["name"].as_str()).unwrap_or("").trim().to_string().to_lowercase();
             if env_id.is_empty() {
                 return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 env 参数（php/node/python/go/java/nginx/redis/mysql/docker）"}});
             }
@@ -9975,7 +9985,7 @@ async fn handle_rpc(state: Arc<AppState>, method: &str, params: serde_json::Valu
             }
         }
         "env.uninstall" => {
-            let env_id = params["env"].as_str().or(params["name"].as_str()).unwrap_or("").trim().to_string().to_lowercase();
+            let env_id = params["id"].as_str().or(params["env"].as_str()).or(params["name"].as_str()).unwrap_or("").trim().to_string().to_lowercase();
             if env_id.is_empty() {
                 return json!({"ok": false, "error": {"code": "INVALID_REQUEST", "message": "缺少 env 参数"}});
             }
